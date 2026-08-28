@@ -2,15 +2,25 @@ import hashlib
 import hmac
 import json
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.db.session import get_db
+from app.models.payment import Payment
+from app.models.webhook_event import WebhookEvent
 
 
 router = APIRouter(
     prefix="/api/webhooks",
     tags=["Webhooks"],
 )
+
+
+# =============================================================
+# RAZORPAY SIGNATURE VERIFICATION
+# =============================================================
 
 
 def verify_razorpay_signature(
@@ -21,8 +31,9 @@ def verify_razorpay_signature(
     """
     Verify a Razorpay webhook signature using HMAC-SHA256.
 
-    Razorpay signs the raw request body using the webhook secret.
-    The raw body must be used exactly as received.
+    Razorpay signs the exact raw request body using the webhook
+    secret. Therefore, the raw body must be used before parsing
+    or modifying the JSON payload.
     """
 
     expected_signature = hmac.new(
@@ -37,30 +48,40 @@ def verify_razorpay_signature(
     )
 
 
+# =============================================================
+# WEBHOOK ENDPOINT
+# =============================================================
+
+
 @router.post("/razorpay")
 async def razorpay_webhook(
     request: Request,
+    db: Session = Depends(get_db),
     x_razorpay_signature: str | None = Header(default=None),
     x_razorpay_event_id: str | None = Header(default=None),
 ):
     """
-    Receive and securely verify Razorpay webhook events.
+    Receive and process Razorpay webhook events.
 
-    Responsibilities at this stage:
-    - Read the raw request body.
-    - Validate Razorpay signature.
-    - Validate event ID.
-    - Parse the JSON payload.
-    - Identify the event.
-    - Dispatch lightweight event handling.
+    Processing flow:
 
-    Persistent event storage, idempotency checks, queueing,
-    and recovery processing will be implemented next.
+    1. Read raw request body.
+    2. Validate required Razorpay headers.
+    3. Verify webhook signature.
+    4. Parse JSON.
+    5. Validate event type.
+    6. Check webhook event idempotency.
+    7. Persist the webhook event.
+    8. Dispatch the event.
+    9. Mark the webhook event as processed.
+    10. Commit the transaction.
+    11. Return successful acknowledgement.
     """
 
     # ---------------------------------------------------------
-    # 1. Read the raw request body
+    # 1. Read raw request body
     # ---------------------------------------------------------
+
     raw_body = await request.body()
 
     if not raw_body:
@@ -72,6 +93,7 @@ async def razorpay_webhook(
     # ---------------------------------------------------------
     # 2. Validate required Razorpay headers
     # ---------------------------------------------------------
+
     if not x_razorpay_signature:
         raise HTTPException(
             status_code=400,
@@ -87,6 +109,7 @@ async def razorpay_webhook(
     # ---------------------------------------------------------
     # 3. Verify signature BEFORE parsing JSON
     # ---------------------------------------------------------
+
     if not verify_razorpay_signature(
         raw_body=raw_body,
         signature=x_razorpay_signature,
@@ -100,6 +123,7 @@ async def razorpay_webhook(
     # ---------------------------------------------------------
     # 4. Parse JSON AFTER signature verification
     # ---------------------------------------------------------
+
     try:
         payload = json.loads(raw_body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -111,6 +135,7 @@ async def razorpay_webhook(
     # ---------------------------------------------------------
     # 5. Validate event type
     # ---------------------------------------------------------
+
     event = payload.get("event")
 
     if not event:
@@ -120,8 +145,74 @@ async def razorpay_webhook(
         )
 
     # ---------------------------------------------------------
-    # 6. Log only safe metadata
+    # 6. Idempotency check
     # ---------------------------------------------------------
+
+    existing_event = (
+        db.query(WebhookEvent)
+        .filter(
+            WebhookEvent.event_id == x_razorpay_event_id,
+        )
+        .first()
+    )
+
+    if existing_event:
+        print(
+            "Duplicate Razorpay webhook ignored:",
+            {
+                "event_id": x_razorpay_event_id,
+                "event": event,
+                "status": existing_event.status,
+            },
+        )
+
+        return {
+            "success": True,
+            "event": event,
+            "event_id": x_razorpay_event_id,
+            "duplicate": True,
+        }
+
+    # ---------------------------------------------------------
+    # 7. Persist webhook event
+    # ---------------------------------------------------------
+
+    webhook_event = WebhookEvent(
+        event_id=x_razorpay_event_id,
+        event_type=event,
+        payload=raw_body.decode("utf-8"),
+        status="received",
+    )
+
+    db.add(webhook_event)
+
+    try:
+        # Flush here so the UNIQUE constraint on event_id is
+        # checked before event processing.
+        db.flush()
+
+    except IntegrityError:
+        db.rollback()
+
+        print(
+            "Duplicate Razorpay webhook detected by database:",
+            {
+                "event_id": x_razorpay_event_id,
+                "event": event,
+            },
+        )
+
+        return {
+            "success": True,
+            "event": event,
+            "event_id": x_razorpay_event_id,
+            "duplicate": True,
+        }
+
+    # ---------------------------------------------------------
+    # 8. Safe logging
+    # ---------------------------------------------------------
+
     print(
         "Razorpay webhook received:",
         {
@@ -131,33 +222,60 @@ async def razorpay_webhook(
     )
 
     # ---------------------------------------------------------
-    # 7. Temporary event dispatch
-    #
-    # Heavy processing will NOT happen here.
-    # In the next step, this will publish/store the event.
+    # 9. Dispatch event
     # ---------------------------------------------------------
-    if event == "payment.failed":
-        await handle_payment_failed(payload)
 
-    elif event == "payment.captured":
-        await handle_payment_captured(payload)
+    try:
+        if event == "payment.failed":
+            await handle_payment_failed(payload, db)
 
-    elif event == "order.paid":
-        await handle_order_paid(payload)
+        elif event == "payment.captured":
+            await handle_payment_captured(payload, db)
 
-    elif event == "payment_link.paid":
-        await handle_payment_link_paid(payload)
+        elif event == "order.paid":
+            await handle_order_paid(payload, db)
 
-    else:
-        print(f"Unhandled Razorpay event: {event}")
+        elif event == "payment_link.paid":
+            await handle_payment_link_paid(payload, db)
+
+        else:
+            print(f"Unhandled Razorpay event: {event}")
+
+        # Mark event as successfully processed.
+        webhook_event.status = "processed"
+
+        # -----------------------------------------------------
+        # 10. Commit webhook + payment changes together
+        # -----------------------------------------------------
+
+        db.commit()
+
+    except Exception as exc:
+        db.rollback()
+
+        print(
+            "Webhook processing failed:",
+            {
+                "event_id": x_razorpay_event_id,
+                "event": event,
+                "error": str(exc),
+            },
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Webhook processing failed.",
+        ) from exc
 
     # ---------------------------------------------------------
-    # 8. Acknowledge the webhook
+    # 11. Acknowledge webhook
     # ---------------------------------------------------------
+
     return {
         "success": True,
         "event": event,
         "event_id": x_razorpay_event_id,
+        "duplicate": False,
     }
 
 
@@ -166,70 +284,134 @@ async def razorpay_webhook(
 # =============================================================
 
 
-async def handle_payment_failed(payload: dict) -> None:
+async def handle_payment_failed(
+    payload: dict,
+    db: Session,
+) -> None:
     """
-    Handle payment.failed.
-
-    For now we only extract the useful metadata.
-    Persistent storage and recovery processing come next.
+    Persist a failed Razorpay payment.
     """
 
-    payment = (
+    payment_data = (
         payload
         .get("payload", {})
         .get("payment", {})
         .get("entity", {})
     )
+
+    payment_id = payment_data.get("id")
+    order_id = payment_data.get("order_id")
+
+    if not payment_id:
+        raise ValueError(
+            "payment.failed event missing payment ID."
+        )
+
+    if not order_id:
+        raise ValueError(
+            "payment.failed event missing order ID."
+        )
+
+    payment = (
+        db.query(Payment)
+        .filter(
+            Payment.razorpay_order_id == order_id,
+        )
+        .first()
+    )
+
+    if not payment:
+        raise ValueError(
+            f"Payment record not found for Razorpay order {order_id}."
+        )
+
+    payment.razorpay_payment_id = payment_id
+    payment.status = "failed"
 
     print(
         "Payment failed:",
         {
-            "payment_id": payment.get("id"),
-            "order_id": payment.get("order_id"),
-            "amount": payment.get("amount"),
-            "currency": payment.get("currency"),
-            "method": payment.get("method"),
-            "error_code": payment.get("error_code"),
-            "error_description": payment.get("error_description"),
-            "error_source": payment.get("error_source"),
-            "error_step": payment.get("error_step"),
-            "error_reason": payment.get("error_reason"),
+            "payment_id": payment_id,
+            "order_id": order_id,
+            "amount": payment_data.get("amount"),
+            "currency": payment_data.get("currency"),
+            "method": payment_data.get("method"),
+            "error_code": payment_data.get("error_code"),
+            "error_description": payment_data.get(
+                "error_description"
+            ),
+            "error_source": payment_data.get("error_source"),
+            "error_step": payment_data.get("error_step"),
+            "error_reason": payment_data.get("error_reason"),
         },
     )
 
 
-async def handle_payment_captured(payload: dict) -> None:
+async def handle_payment_captured(
+    payload: dict,
+    db: Session,
+) -> None:
     """
-    Handle payment.captured.
-
-    Persistent state updates will be implemented next.
+    Persist a captured Razorpay payment.
     """
 
-    payment = (
+    payment_data = (
         payload
         .get("payload", {})
         .get("payment", {})
         .get("entity", {})
     )
 
+    payment_id = payment_data.get("id")
+    order_id = payment_data.get("order_id")
+
+    if not payment_id:
+        raise ValueError(
+            "payment.captured event missing payment ID."
+        )
+
+    if not order_id:
+        raise ValueError(
+            "payment.captured event missing order ID."
+        )
+
+    payment = (
+        db.query(Payment)
+        .filter(
+            Payment.razorpay_order_id == order_id,
+        )
+        .first()
+    )
+
+    if not payment:
+        raise ValueError(
+            f"Payment record not found for Razorpay order {order_id}."
+        )
+
+    payment.razorpay_payment_id = payment_id
+    payment.status = "captured"
+
     print(
         "Payment captured:",
         {
-            "payment_id": payment.get("id"),
-            "order_id": payment.get("order_id"),
-            "amount": payment.get("amount"),
-            "currency": payment.get("currency"),
-            "method": payment.get("method"),
+            "payment_id": payment_id,
+            "order_id": order_id,
+            "amount": payment_data.get("amount"),
+            "currency": payment_data.get("currency"),
+            "method": payment_data.get("method"),
         },
     )
 
 
-async def handle_order_paid(payload: dict) -> None:
+async def handle_order_paid(
+    payload: dict,
+    db: Session,
+) -> None:
     """
     Handle order.paid.
 
-    This event will later be reconciled against payment state
-    so the same revenue is not counted twice.
+    The payment entity is used to reconcile the corresponding
+    payment record.
     """
 
     order = (
@@ -239,10 +421,32 @@ async def handle_order_paid(payload: dict) -> None:
         .get("entity", {})
     )
 
+    order_id = order.get("id")
+
+    if not order_id:
+        raise ValueError(
+            "order.paid event missing order ID."
+        )
+
+    payment = (
+        db.query(Payment)
+        .filter(
+            Payment.razorpay_order_id == order_id,
+        )
+        .first()
+    )
+
+    if not payment:
+        raise ValueError(
+            f"Payment record not found for Razorpay order {order_id}."
+        )
+
+    payment.status = "paid"
+
     print(
         "Order paid:",
         {
-            "order_id": order.get("id"),
+            "order_id": order_id,
             "amount": order.get("amount"),
             "amount_paid": order.get("amount_paid"),
             "currency": order.get("currency"),
@@ -251,11 +455,18 @@ async def handle_order_paid(payload: dict) -> None:
     )
 
 
-async def handle_payment_link_paid(payload: dict) -> None:
+async def handle_payment_link_paid(
+    payload: dict,
+    db: Session,
+) -> None:
     """
     Handle payment_link.paid.
 
-    This will eventually mark a recovery opportunity as recovered.
+    Payment-link events do not necessarily contain a direct
+    payments-table order ID, so they are logged for now.
+
+    A dedicated recovery/payment-link model will be introduced
+    when the revenue recovery workflow is implemented.
     """
 
     payment_link = (

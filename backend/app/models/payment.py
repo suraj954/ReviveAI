@@ -21,6 +21,12 @@ class Payment(Base):
         index=True,
         nullable=False,
     )
+    razorpay_payment_id: Mapped[str | None] = mapped_column(
+        String(100),
+        unique=True,
+        index=True,
+        nullable=True,
+    )
 
     amount: Mapped[int] = mapped_column(
         Integer,
