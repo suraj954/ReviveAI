@@ -10,9 +10,7 @@ from app.config import settings
 from app.db.session import get_db
 from app.models.payment import Payment
 from app.models.webhook_event import WebhookEvent
-from app.razorpay.recovery_gateway import RazorpayRecoveryGateway
-from app.services.recovery_executor import RecoveryExecutor
-from app.services.recovery_service import RecoveryService
+from app.services.recovery_factory import get_recovery_service
 
 
 router = APIRouter(
@@ -129,6 +127,7 @@ async def razorpay_webhook(
 
     try:
         payload = json.loads(raw_body.decode("utf-8"))
+
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(
             status_code=400,
@@ -292,7 +291,8 @@ async def handle_payment_failed(
     db: Session,
 ) -> None:
     """
-    Persist a failed Razorpay payment.
+    Persist a failed Razorpay payment and trigger the recovery
+    evaluation workflow.
     """
 
     payment_data = (
@@ -328,22 +328,16 @@ async def handle_payment_failed(
             f"Payment record not found for Razorpay order {order_id}."
         )
 
+    # Update payment state before recovery evaluation.
     payment.razorpay_payment_id = payment_id
     payment.status = "failed"
 
     # ---------------------------------------------------------
-    # Trigger recovery workflow
+    # Trigger recovery workflow through the factory
     # ---------------------------------------------------------
 
-    gateway = RazorpayRecoveryGateway()
-
-    executor = RecoveryExecutor(
-        gateway=gateway,
-    )
-
-    recovery_service = RecoveryService(
+    recovery_service = get_recovery_service(
         db=db,
-        executor=executor,
     )
 
     (
@@ -451,7 +445,7 @@ async def handle_order_paid(
     """
     Handle order.paid.
 
-    The payment entity is used to reconcile the corresponding
+    The order entity is used to reconcile the corresponding
     payment record.
     """
 
@@ -503,11 +497,8 @@ async def handle_payment_link_paid(
     """
     Handle payment_link.paid.
 
-    Payment-link events do not necessarily contain a direct
-    payments-table order ID, so they are logged for now.
-
-    A dedicated recovery/payment-link model will be introduced
-    when the revenue recovery workflow is implemented.
+    Payment-link events are logged separately because they do not
+    necessarily map directly to a payments-table order ID.
     """
 
     payment_link = (
