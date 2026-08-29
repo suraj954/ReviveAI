@@ -20,6 +20,10 @@ class RecoveryService:
     Coordinates recovery decisions, safety checks, execution,
     and persistence of recovery attempts.
 
+    Transaction ownership belongs to the caller. This service uses
+    flush() to synchronize pending changes without committing the
+    surrounding database transaction.
+
     A payment is allowed a limited number of recovery attempts
     to prevent repeated failures from creating unlimited provider
     recovery operations.
@@ -47,6 +51,9 @@ class RecoveryService:
 
         This method records the recovery decision without executing
         an external recovery operation.
+
+        The caller is responsible for committing or rolling back
+        the database transaction.
         """
 
         decision = self.agent.evaluate(payment)
@@ -58,7 +65,7 @@ class RecoveryService:
         )
 
         self.db.add(attempt)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(attempt)
 
         return attempt
@@ -78,6 +85,9 @@ class RecoveryService:
         Recovery attempts are capped by MAX_RECOVERY_ATTEMPTS.
         Once the limit is reached, no external provider action
         is executed.
+
+        The caller owns the transaction and is responsible for the
+        final commit or rollback.
         """
 
         if self.executor is None:
@@ -116,7 +126,7 @@ class RecoveryService:
         )
 
         self.db.add(attempt)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(attempt)
 
         # ---------------------------------------------------------
@@ -129,7 +139,7 @@ class RecoveryService:
             attempt.error_message = guardrail_result.reason
             attempt.completed_at = datetime.now(UTC)
 
-            self.db.commit()
+            self.db.flush()
             self.db.refresh(attempt)
 
             execution_result = RecoveryExecutionResult(
@@ -152,7 +162,7 @@ class RecoveryService:
         # ---------------------------------------------------------
 
         attempt.status = "executing"
-        self.db.commit()
+        self.db.flush()
 
         # ---------------------------------------------------------
         # 6. Execute approved recovery action
@@ -166,12 +176,27 @@ class RecoveryService:
             )
 
             if execution_result.executed:
-                attempt.status = "completed"
-                attempt.recovered = True
                 attempt.provider_reference_id = (
                     execution_result.reference_id
                 )
                 attempt.error_message = None
+
+                # Successfully creating a recovery order does NOT
+                # mean the payment itself has been recovered.
+                if decision.action == "retry":
+                    attempt.status = "awaiting_payment"
+                    attempt.recovered = None
+                    attempt.completed_at = None
+
+                elif decision.action == "wait_and_retry":
+                    attempt.status = "scheduled"
+                    attempt.recovered = None
+                    attempt.completed_at = None
+
+                else:
+                    attempt.status = execution_result.status
+                    attempt.recovered = False
+
             else:
                 attempt.status = execution_result.status
                 attempt.recovered = False
@@ -195,12 +220,19 @@ class RecoveryService:
             )
 
         # ---------------------------------------------------------
-        # 7. Mark completion
+        # 7. Mark completion only for terminal states
         # ---------------------------------------------------------
 
-        attempt.completed_at = datetime.now(UTC)
+        terminal_statuses = {
+            "blocked",
+            "failed",
+            "completed",
+        }
 
-        self.db.commit()
+        if attempt.status in terminal_statuses:
+            attempt.completed_at = datetime.now(UTC)
+
+        self.db.flush()
         self.db.refresh(attempt)
 
         return (
@@ -222,6 +254,9 @@ class RecoveryService:
         """
         Create a blocked recovery attempt when the maximum number
         of allowed recovery attempts has already been reached.
+
+        The caller remains responsible for committing or rolling
+        back the transaction.
         """
 
         reason = (
@@ -240,7 +275,7 @@ class RecoveryService:
         )
 
         self.db.add(attempt)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(attempt)
 
         decision = RecoveryDecision(

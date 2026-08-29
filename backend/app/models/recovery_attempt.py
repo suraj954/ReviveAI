@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -56,7 +56,7 @@ class RecoveryAttempt(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=lambda: datetime.now(UTC),
         nullable=False,
     )
 
@@ -84,5 +84,7 @@ class RecoveryAttempt(Base):
         self.recovered = recovered
         self.provider_reference_id = provider_reference_id
         self.error_message = error_message
-        self.created_at = created_at or datetime.utcnow()
+        self.created_at = (
+            created_at or datetime.now(UTC)
+        )
         self.completed_at = completed_at

@@ -1,11 +1,11 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 
 from app.ml.features import build_payment_features
 from app.models.payment import Payment
 
 
 def test_captured_payment_features() -> None:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     payment = Payment(
         razorpay_order_id="order_test_1",
@@ -29,7 +29,7 @@ def test_captured_payment_features() -> None:
 
 
 def test_failed_payment_features() -> None:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     payment = Payment(
         razorpay_order_id="order_test_2",
@@ -52,7 +52,7 @@ def test_failed_payment_features() -> None:
 
 
 def test_created_payment_features() -> None:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     payment = Payment(
         razorpay_order_id="order_test_3",
@@ -72,7 +72,7 @@ def test_created_payment_features() -> None:
 
 
 def test_payment_age_is_calculated() -> None:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     created_at = now - timedelta(seconds=60)
 
     payment = Payment(
@@ -90,7 +90,7 @@ def test_payment_age_is_calculated() -> None:
 
 
 def test_currency_is_case_insensitive() -> None:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     payment = Payment(
         razorpay_order_id="order_test_5",

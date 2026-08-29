@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 from app.models.recovery_attempt import RecoveryAttempt
 
@@ -19,7 +19,7 @@ def test_recovery_attempt_model_defaults() -> None:
 
 
 def test_recovery_attempt_can_store_success() -> None:
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
 
     attempt = RecoveryAttempt(
         payment_id=1,

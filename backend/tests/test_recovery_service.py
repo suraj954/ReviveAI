@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -41,12 +41,14 @@ class FakeSession:
         self.added.append(obj)
         self.attempts.append(obj)
 
+    def flush(self):
+        pass
+
     def commit(self):
         pass
 
     def refresh(self, obj):
         pass
-
 
 class FakeAgent:
     def __init__(
@@ -112,7 +114,7 @@ def make_payment(
         currency="INR",
         status=status,
         receipt="test_receipt",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
 
     payment.id = payment_id
@@ -235,11 +237,11 @@ def test_successful_recovery_is_persisted() -> None:
     assert returned_execution == execution
 
     assert attempt.action == "retry"
-    assert attempt.status == "completed"
-    assert attempt.recovered is True
+    assert attempt.status == "awaiting_payment"
+    assert attempt.recovered is None
     assert attempt.provider_reference_id == "retry_1"
     assert attempt.error_message is None
-    assert attempt.completed_at is not None
+    assert attempt.completed_at is None
 
     assert executor.calls == [
         (payment, "retry", True),

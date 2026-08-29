@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.decisions.guardrails import GuardrailResult
 from app.decisions.policy import RecoveryDecision
@@ -27,7 +27,7 @@ def make_payment(payment_id: int) -> Payment:
         currency="INR",
         status="failed",
         receipt="test_receipt",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
 
     payment.id = payment_id

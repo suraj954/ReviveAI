@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
@@ -9,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db.session import get_db
 from app.models.payment import Payment
+from app.models.recovery_attempt import RecoveryAttempt
 from app.models.webhook_event import WebhookEvent
 from app.services.recovery_factory import get_recovery_service
 
@@ -387,7 +389,15 @@ async def handle_payment_captured(
     db: Session,
 ) -> None:
     """
-    Persist a captured Razorpay payment.
+    Handle a captured Razorpay payment.
+
+    A captured order can represent either:
+
+    1. A normal payment belonging directly to a Payment record.
+    2. A recovery payment created by the recovery workflow.
+
+    Recovery payments are reconciled through
+    RecoveryAttempt.provider_reference_id.
     """
 
     payment_data = (
@@ -409,6 +419,41 @@ async def handle_payment_captured(
         raise ValueError(
             "payment.captured event missing order ID."
         )
+
+    # ---------------------------------------------------------
+    # 1. Check whether this is a recovery order
+    # ---------------------------------------------------------
+
+    recovery_attempt = (
+        db.query(RecoveryAttempt)
+        .filter(
+            RecoveryAttempt.provider_reference_id == order_id,
+        )
+        .first()
+    )
+
+    if recovery_attempt:
+        recovery_attempt.status = "completed"
+        recovery_attempt.recovered = True
+        recovery_attempt.completed_at = datetime.now(UTC)
+
+        print(
+            "Recovery payment captured:",
+            {
+                "payment_id": payment_id,
+                "recovery_order_id": order_id,
+                "recovery_attempt_id": recovery_attempt.id,
+                "original_payment_id": recovery_attempt.payment_id,
+                "amount": payment_data.get("amount"),
+                "currency": payment_data.get("currency"),
+            },
+        )
+
+        return
+
+    # ---------------------------------------------------------
+    # 2. Otherwise process as a normal payment
+    # ---------------------------------------------------------
 
     payment = (
         db.query(Payment)
@@ -436,8 +481,6 @@ async def handle_payment_captured(
             "method": payment_data.get("method"),
         },
     )
-
-
 async def handle_order_paid(
     payload: dict,
     db: Session,

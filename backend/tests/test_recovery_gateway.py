@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -18,7 +18,7 @@ def make_payment(
         currency="INR",
         status=status,
         receipt="test_receipt",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
 
 

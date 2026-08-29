@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.dashboard import router as dashboard_router
 from app.api.orders import router as orders_router
 from app.api.webhooks import router as webhooks_router
 
@@ -26,6 +27,7 @@ app.add_middleware(
 
 app.include_router(orders_router)
 app.include_router(webhooks_router)
+app.include_router(dashboard_router)
 
 
 @app.get("/")

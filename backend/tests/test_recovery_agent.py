@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.agents.recovery_agent import RecoveryAgent
 from app.models.payment import Payment
@@ -11,7 +11,7 @@ def make_payment(status: str) -> Payment:
         currency="INR",
         status=status,
         receipt="test_receipt",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
 
 

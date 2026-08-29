@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from app.models.payment import Payment
 
@@ -35,11 +35,26 @@ def build_payment_features(
     """
 
     if now is None:
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
+
+    created_at = payment.created_at
+
+    # Normalize naive datetimes as UTC for compatibility with
+    # existing database records and tests.
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(
+            tzinfo=UTC,
+        )
+
+    # Normalize a naive caller-provided `now` value as UTC.
+    if now.tzinfo is None:
+        now = now.replace(
+            tzinfo=UTC,
+        )
 
     age_seconds = max(
         0.0,
-        (now - payment.created_at).total_seconds(),
+        (now - created_at).total_seconds(),
     )
 
     status = payment.status.lower()
