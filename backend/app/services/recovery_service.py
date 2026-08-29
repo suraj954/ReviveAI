@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
@@ -20,20 +20,12 @@ class RecoveryService:
     Coordinates recovery decisions, safety checks, execution,
     and persistence of recovery attempts.
 
-    Responsibilities are deliberately separated:
-
-        RecoveryAgent
-            -> decides the recovery action
-
-        Guardrails
-            -> determine whether execution is allowed
-
-        RecoveryExecutor
-            -> executes an approved recovery action
-
-        RecoveryAttempt
-            -> persists the recovery result
+    A payment is allowed a limited number of recovery attempts
+    to prevent repeated failures from creating unlimited provider
+    recovery operations.
     """
+
+    MAX_RECOVERY_ATTEMPTS = 3
 
     def __init__(
         self,
@@ -53,8 +45,8 @@ class RecoveryService:
         """
         Evaluate a payment and persist the resulting recovery attempt.
 
-        This method only records the recovery decision.
-        It does not execute an external recovery operation.
+        This method records the recovery decision without executing
+        an external recovery operation.
         """
 
         decision = self.agent.evaluate(payment)
@@ -83,14 +75,10 @@ class RecoveryService:
         """
         Evaluate, guard, execute, and persist a recovery attempt.
 
-        The full Payment object is passed to RecoveryExecutor so that
-        the provider gateway has access to the payment's status,
-        amount, Razorpay order ID, and other required information.
+        Recovery attempts are capped by MAX_RECOVERY_ATTEMPTS.
+        Once the limit is reached, no external provider action
+        is executed.
         """
-
-        # ---------------------------------------------------------
-        # 1. Executor must be explicitly provided
-        # ---------------------------------------------------------
 
         if self.executor is None:
             raise RuntimeError(
@@ -98,7 +86,18 @@ class RecoveryService:
             )
 
         # ---------------------------------------------------------
-        # 2. Ask the agent for a decision and guardrail result
+        # 1. Check recovery attempt limit
+        # ---------------------------------------------------------
+
+        existing_attempts = self._attempt_count(payment.id)
+
+        if existing_attempts >= self.MAX_RECOVERY_ATTEMPTS:
+            return self._create_max_attempts_blocked_result(
+                payment=payment,
+            )
+
+        # ---------------------------------------------------------
+        # 2. Ask agent for decision and guardrail result
         # ---------------------------------------------------------
 
         decision, guardrail_result = (
@@ -106,7 +105,7 @@ class RecoveryService:
         )
 
         # ---------------------------------------------------------
-        # 3. Persist the recovery attempt as pending
+        # 3. Persist recovery attempt as pending
         # ---------------------------------------------------------
 
         attempt = RecoveryAttempt(
@@ -121,14 +120,14 @@ class RecoveryService:
         self.db.refresh(attempt)
 
         # ---------------------------------------------------------
-        # 4. Stop immediately if guardrails reject the action
+        # 4. Stop if guardrails reject the action
         # ---------------------------------------------------------
 
         if not guardrail_result.allowed:
             attempt.status = "blocked"
             attempt.recovered = False
             attempt.error_message = guardrail_result.reason
-            attempt.completed_at = datetime.utcnow()
+            attempt.completed_at = datetime.now(UTC)
 
             self.db.commit()
             self.db.refresh(attempt)
@@ -156,10 +155,7 @@ class RecoveryService:
         self.db.commit()
 
         # ---------------------------------------------------------
-        # 6. Execute through RecoveryExecutor
-        #
-        # IMPORTANT:
-        # Pass the complete Payment object, NOT payment.id.
+        # 6. Execute approved recovery action
         # ---------------------------------------------------------
 
         try:
@@ -168,10 +164,6 @@ class RecoveryService:
                 decision=decision,
                 guardrail_result=guardrail_result,
             )
-
-            # ---------------------------------------------------------
-            # 7. Persist execution result
-            # ---------------------------------------------------------
 
             if execution_result.executed:
                 attempt.status = "completed"
@@ -189,10 +181,6 @@ class RecoveryService:
                 attempt.error_message = execution_result.reason
 
         except Exception as exc:
-            # -----------------------------------------------------
-            # 8. Persist unexpected gateway/executor failures
-            # -----------------------------------------------------
-
             attempt.status = "failed"
             attempt.recovered = False
             attempt.provider_reference_id = None
@@ -207,10 +195,10 @@ class RecoveryService:
             )
 
         # ---------------------------------------------------------
-        # 9. Mark completion time
+        # 7. Mark completion
         # ---------------------------------------------------------
 
-        attempt.completed_at = datetime.utcnow()
+        attempt.completed_at = datetime.now(UTC)
 
         self.db.commit()
         self.db.refresh(attempt)
@@ -220,6 +208,80 @@ class RecoveryService:
             decision,
             guardrail_result,
             execution_result,
+        )
+
+    def _create_max_attempts_blocked_result(
+        self,
+        payment: Payment,
+    ) -> tuple[
+        RecoveryAttempt,
+        RecoveryDecision,
+        GuardrailResult,
+        RecoveryExecutionResult,
+    ]:
+        """
+        Create a blocked recovery attempt when the maximum number
+        of allowed recovery attempts has already been reached.
+        """
+
+        reason = (
+            f"Maximum recovery attempts "
+            f"({self.MAX_RECOVERY_ATTEMPTS}) reached."
+        )
+
+        attempt = RecoveryAttempt(
+            payment_id=payment.id,
+            action="no_action",
+            attempt_number=self._next_attempt_number(payment.id),
+            status="blocked",
+            recovered=False,
+            error_message=reason,
+            completed_at=datetime.now(UTC),
+        )
+
+        self.db.add(attempt)
+        self.db.commit()
+        self.db.refresh(attempt)
+
+        decision = RecoveryDecision(
+            action="no_action",
+            reason=reason,
+        )
+
+        guardrail_result = GuardrailResult(
+            allowed=False,
+            reason=reason,
+        )
+
+        execution_result = RecoveryExecutionResult(
+            executed=False,
+            action="no_action",
+            status="blocked",
+            reference_id=None,
+            reason=reason,
+        )
+
+        return (
+            attempt,
+            decision,
+            guardrail_result,
+            execution_result,
+        )
+
+    def _attempt_count(
+        self,
+        payment_id: int,
+    ) -> int:
+        """
+        Return the total number of recovery attempts for a payment.
+        """
+
+        return (
+            self.db.query(RecoveryAttempt)
+            .filter(
+                RecoveryAttempt.payment_id == payment_id,
+            )
+            .count()
         )
 
     def _next_attempt_number(
@@ -245,4 +307,3 @@ class RecoveryService:
             return 1
 
         return latest_attempt.attempt_number + 1
-

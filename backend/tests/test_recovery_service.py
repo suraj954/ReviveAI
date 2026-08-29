@@ -11,8 +11,8 @@ from app.services.recovery_service import RecoveryService
 
 
 class FakeQuery:
-    def __init__(self, attempts):
-        self.attempts = attempts
+    def __init__(self, items):
+        self.items = items
 
     def filter(self, *args):
         return self
@@ -21,7 +21,12 @@ class FakeQuery:
         return self
 
     def first(self):
-        return self.attempts[-1] if self.attempts else None
+        if not self.items:
+            return None
+        return self.items[-1]
+
+    def count(self):
+        return len(self.items)
 
 
 class FakeSession:
