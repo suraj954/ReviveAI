@@ -52,6 +52,80 @@ def verify_razorpay_signature(
 
 
 # =============================================================
+# RECOVERY STATE MANAGEMENT
+# =============================================================
+
+
+def cancel_active_recovery_attempts(
+    payment: Payment,
+    db: Session,
+) -> int:
+    """
+    Cancel active recovery attempts when the original payment
+    succeeds before the recovery flow is completed.
+
+    Example:
+
+        Original payment fails
+                ↓
+        Recovery order created
+                ↓
+        Original payment succeeds
+                ↓
+        Recovery is no longer required
+                ↓
+        Active recovery attempts are cancelled
+
+    Terminal recovery attempts such as completed, failed, and
+    blocked are not modified.
+    """
+
+    active_statuses = (
+        "pending",
+        "executing",
+        "awaiting_payment",
+        "scheduled",
+    )
+
+    attempts = (
+        db.query(RecoveryAttempt)
+        .filter(
+            RecoveryAttempt.payment_id == payment.id,
+            RecoveryAttempt.status.in_(active_statuses),
+        )
+        .all()
+    )
+
+    if not attempts:
+        return 0
+
+    now = datetime.now(UTC)
+
+    for attempt in attempts:
+        attempt.status = "cancelled"
+        attempt.recovered = False
+        attempt.error_message = (
+            "Original payment succeeded before recovery "
+            "was completed."
+        )
+        attempt.completed_at = now
+
+    print(
+        "Active recovery attempts cancelled:",
+        {
+            "payment_db_id": payment.id,
+            "count": len(attempts),
+            "reason": (
+                "Original payment succeeded before "
+                "recovery was completed."
+            ),
+        },
+    )
+
+    return len(attempts)
+
+
+# =============================================================
 # WEBHOOK ENDPOINT
 # =============================================================
 
@@ -128,9 +202,14 @@ async def razorpay_webhook(
     # ---------------------------------------------------------
 
     try:
-        payload = json.loads(raw_body.decode("utf-8"))
+        payload = json.loads(
+            raw_body.decode("utf-8")
+        )
 
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as exc:
         raise HTTPException(
             status_code=400,
             detail="Invalid JSON payload.",
@@ -155,7 +234,8 @@ async def razorpay_webhook(
     existing_event = (
         db.query(WebhookEvent)
         .filter(
-            WebhookEvent.event_id == x_razorpay_event_id,
+            WebhookEvent.event_id
+            == x_razorpay_event_id,
         )
         .first()
     )
@@ -191,8 +271,6 @@ async def razorpay_webhook(
     db.add(webhook_event)
 
     try:
-        # Flush here so the UNIQUE constraint on event_id is
-        # checked before event processing.
         db.flush()
 
     except IntegrityError:
@@ -231,21 +309,34 @@ async def razorpay_webhook(
 
     try:
         if event == "payment.failed":
-            await handle_payment_failed(payload, db)
+            await handle_payment_failed(
+                payload,
+                db,
+            )
 
         elif event == "payment.captured":
-            await handle_payment_captured(payload, db)
+            await handle_payment_captured(
+                payload,
+                db,
+            )
 
         elif event == "order.paid":
-            await handle_order_paid(payload, db)
+            await handle_order_paid(
+                payload,
+                db,
+            )
 
         elif event == "payment_link.paid":
-            await handle_payment_link_paid(payload, db)
+            await handle_payment_link_paid(
+                payload,
+                db,
+            )
 
         else:
-            print(f"Unhandled Razorpay event: {event}")
+            print(
+                f"Unhandled Razorpay event: {event}"
+            )
 
-        # Mark event as successfully processed.
         webhook_event.status = "processed"
 
         # -----------------------------------------------------
@@ -327,16 +418,12 @@ async def handle_payment_failed(
 
     if not payment:
         raise ValueError(
-            f"Payment record not found for Razorpay order {order_id}."
+            "Payment record not found for "
+            f"Razorpay order {order_id}."
         )
 
-    # Update payment state before recovery evaluation.
     payment.razorpay_payment_id = payment_id
     payment.status = "failed"
-
-    # ---------------------------------------------------------
-    # Trigger recovery workflow through the factory
-    # ---------------------------------------------------------
 
     recovery_service = get_recovery_service(
         db=db,
@@ -377,9 +464,15 @@ async def handle_payment_failed(
             "error_description": payment_data.get(
                 "error_description"
             ),
-            "error_source": payment_data.get("error_source"),
-            "error_step": payment_data.get("error_step"),
-            "error_reason": payment_data.get("error_reason"),
+            "error_source": payment_data.get(
+                "error_source"
+            ),
+            "error_step": payment_data.get(
+                "error_step"
+            ),
+            "error_reason": payment_data.get(
+                "error_reason"
+            ),
         },
     )
 
@@ -391,13 +484,15 @@ async def handle_payment_captured(
     """
     Handle a captured Razorpay payment.
 
-    A captured order can represent either:
+    A captured payment can belong to either:
 
-    1. A normal payment belonging directly to a Payment record.
-    2. A recovery payment created by the recovery workflow.
+    1. A recovery order created by ReviveAI.
+    2. The original payment order.
 
-    Recovery payments are reconciled through
-    RecoveryAttempt.provider_reference_id.
+    Recovery payments complete the corresponding recovery attempt.
+
+    Original payment success cancels any active recovery attempts
+    because recovery is no longer necessary.
     """
 
     payment_data = (
@@ -421,13 +516,14 @@ async def handle_payment_captured(
         )
 
     # ---------------------------------------------------------
-    # 1. Check whether this is a recovery order
+    # 1. Check whether this belongs to a recovery order
     # ---------------------------------------------------------
 
     recovery_attempt = (
         db.query(RecoveryAttempt)
         .filter(
-            RecoveryAttempt.provider_reference_id == order_id,
+            RecoveryAttempt.provider_reference_id
+            == order_id,
         )
         .first()
     )
@@ -435,15 +531,21 @@ async def handle_payment_captured(
     if recovery_attempt:
         recovery_attempt.status = "completed"
         recovery_attempt.recovered = True
-        recovery_attempt.completed_at = datetime.now(UTC)
+        recovery_attempt.completed_at = datetime.now(
+            UTC
+        )
 
         print(
             "Recovery payment captured:",
             {
                 "payment_id": payment_id,
                 "recovery_order_id": order_id,
-                "recovery_attempt_id": recovery_attempt.id,
-                "original_payment_id": recovery_attempt.payment_id,
+                "recovery_attempt_id": (
+                    recovery_attempt.id
+                ),
+                "original_payment_id": (
+                    recovery_attempt.payment_id
+                ),
                 "amount": payment_data.get("amount"),
                 "currency": payment_data.get("currency"),
             },
@@ -469,7 +571,11 @@ async def handle_payment_captured(
         )
 
     payment.razorpay_payment_id = payment_id
-    payment.status = "captured"
+
+    # Do not downgrade a payment that has already reached
+    # the final "paid" state due to webhook arrival order.
+    if payment.status != "paid":
+        payment.status = "captured"
 
     print(
         "Payment captured:",
@@ -481,6 +587,8 @@ async def handle_payment_captured(
             "method": payment_data.get("method"),
         },
     )
+
+
 async def handle_order_paid(
     payload: dict,
     db: Session,
@@ -488,8 +596,15 @@ async def handle_order_paid(
     """
     Handle order.paid.
 
-    The order entity is used to reconcile the corresponding
-    payment record.
+    The order may belong to:
+
+    1. A ReviveAI recovery order.
+    2. An original payment record.
+
+    Recovery orders must not be treated as original orders.
+
+    When an original order is paid, any active recovery attempts
+    are cancelled because recovery is no longer required.
     """
 
     order = (
@@ -506,6 +621,51 @@ async def handle_order_paid(
             "order.paid event missing order ID."
         )
 
+    # ---------------------------------------------------------
+    # 1. Check whether this is a recovery order
+    # ---------------------------------------------------------
+
+    recovery_attempt = (
+        db.query(RecoveryAttempt)
+        .filter(
+            RecoveryAttempt.provider_reference_id
+            == order_id,
+        )
+        .first()
+    )
+
+    if recovery_attempt:
+        # payment.captured may already have completed this
+        # recovery. Keep this operation idempotent.
+        if recovery_attempt.status != "completed":
+            recovery_attempt.status = "completed"
+            recovery_attempt.recovered = True
+            recovery_attempt.completed_at = datetime.now(
+                UTC
+            )
+
+        print(
+            "Recovery order paid:",
+            {
+                "recovery_order_id": order_id,
+                "recovery_attempt_id": (
+                    recovery_attempt.id
+                ),
+                "original_payment_id": (
+                    recovery_attempt.payment_id
+                ),
+                "amount": order.get("amount"),
+                "amount_paid": order.get("amount_paid"),
+                "currency": order.get("currency"),
+            },
+        )
+
+        return
+
+    # ---------------------------------------------------------
+    # 2. Process as original order
+    # ---------------------------------------------------------
+
     payment = (
         db.query(Payment)
         .filter(
@@ -516,10 +676,19 @@ async def handle_order_paid(
 
     if not payment:
         raise ValueError(
-            f"Payment record not found for Razorpay order {order_id}."
+            "Payment record not found for "
+            f"Razorpay order {order_id}."
         )
 
     payment.status = "paid"
+
+    # This is intentionally safe even if payment.captured already
+    # cancelled the attempts. There will simply be zero active
+    # attempts remaining.
+    cancelled_count = cancel_active_recovery_attempts(
+        payment,
+        db,
+    )
 
     print(
         "Order paid:",
@@ -529,6 +698,9 @@ async def handle_order_paid(
             "amount_paid": order.get("amount_paid"),
             "currency": order.get("currency"),
             "status": order.get("status"),
+            "cancelled_recovery_attempts": (
+                cancelled_count
+            ),
         },
     )
 
@@ -556,7 +728,9 @@ async def handle_payment_link_paid(
         {
             "payment_link_id": payment_link.get("id"),
             "amount": payment_link.get("amount"),
-            "amount_paid": payment_link.get("amount_paid"),
+            "amount_paid": payment_link.get(
+                "amount_paid"
+            ),
             "status": payment_link.get("status"),
         },
     )

@@ -24,9 +24,11 @@ class RecoveryService:
     flush() to synchronize pending changes without committing the
     surrounding database transaction.
 
-    A payment is allowed a limited number of recovery attempts
-    to prevent repeated failures from creating unlimited provider
-    recovery operations.
+    Recovery rules:
+    - A payment can have at most MAX_RECOVERY_ATTEMPTS recovery attempts.
+    - Once a payment is successfully recovered, no further recovery
+      action is allowed.
+    - Guardrails can block an otherwise valid recovery action.
     """
 
     MAX_RECOVERY_ATTEMPTS = 3
@@ -61,7 +63,9 @@ class RecoveryService:
         attempt = RecoveryAttempt(
             payment_id=payment.id,
             action=decision.action,
-            attempt_number=self._next_attempt_number(payment.id),
+            attempt_number=self._next_attempt_number(
+                payment.id
+            ),
         )
 
         self.db.add(attempt)
@@ -82,9 +86,9 @@ class RecoveryService:
         """
         Evaluate, guard, execute, and persist a recovery attempt.
 
-        Recovery attempts are capped by MAX_RECOVERY_ATTEMPTS.
-        Once the limit is reached, no external provider action
-        is executed.
+        Recovery execution stops when:
+        - the payment has already been successfully recovered, or
+        - the maximum recovery attempt limit has been reached.
 
         The caller owns the transaction and is responsible for the
         final commit or rollback.
@@ -96,10 +100,26 @@ class RecoveryService:
             )
 
         # ---------------------------------------------------------
-        # 1. Check recovery attempt limit
+        # 1. Stop if payment was already successfully recovered
         # ---------------------------------------------------------
 
-        existing_attempts = self._attempt_count(payment.id)
+        successful_attempt = self._successful_recovery_attempt(
+            payment.id
+        )
+
+        if successful_attempt is not None:
+            return self._create_already_recovered_result(
+                payment=payment,
+                successful_attempt=successful_attempt,
+            )
+
+        # ---------------------------------------------------------
+        # 2. Check recovery attempt limit
+        # ---------------------------------------------------------
+
+        existing_attempts = self._attempt_count(
+            payment.id
+        )
 
         if existing_attempts >= self.MAX_RECOVERY_ATTEMPTS:
             return self._create_max_attempts_blocked_result(
@@ -107,21 +127,26 @@ class RecoveryService:
             )
 
         # ---------------------------------------------------------
-        # 2. Ask agent for decision and guardrail result
+        # 3. Ask agent for decision and guardrail result
         # ---------------------------------------------------------
 
-        decision, guardrail_result = (
-            self.agent.evaluate_with_guardrails(payment)
+        (
+            decision,
+            guardrail_result,
+        ) = self.agent.evaluate_with_guardrails(
+            payment
         )
 
         # ---------------------------------------------------------
-        # 3. Persist recovery attempt as pending
+        # 4. Persist recovery attempt as pending
         # ---------------------------------------------------------
 
         attempt = RecoveryAttempt(
             payment_id=payment.id,
             action=decision.action,
-            attempt_number=self._next_attempt_number(payment.id),
+            attempt_number=self._next_attempt_number(
+                payment.id
+            ),
             status="pending",
         )
 
@@ -130,7 +155,7 @@ class RecoveryService:
         self.db.refresh(attempt)
 
         # ---------------------------------------------------------
-        # 4. Stop if guardrails reject the action
+        # 5. Stop if guardrails reject the action
         # ---------------------------------------------------------
 
         if not guardrail_result.allowed:
@@ -158,14 +183,14 @@ class RecoveryService:
             )
 
         # ---------------------------------------------------------
-        # 5. Mark attempt as executing
+        # 6. Mark attempt as executing
         # ---------------------------------------------------------
 
         attempt.status = "executing"
         self.db.flush()
 
         # ---------------------------------------------------------
-        # 6. Execute approved recovery action
+        # 7. Execute approved recovery action
         # ---------------------------------------------------------
 
         try:
@@ -181,8 +206,8 @@ class RecoveryService:
                 )
                 attempt.error_message = None
 
-                # Successfully creating a recovery order does NOT
-                # mean the payment itself has been recovered.
+                # Creating a recovery order does NOT mean the
+                # original payment has been recovered.
                 if decision.action == "retry":
                     attempt.status = "awaiting_payment"
                     attempt.recovered = None
@@ -194,16 +219,22 @@ class RecoveryService:
                     attempt.completed_at = None
 
                 else:
-                    attempt.status = execution_result.status
+                    attempt.status = (
+                        execution_result.status
+                    )
                     attempt.recovered = False
 
             else:
                 attempt.status = execution_result.status
                 attempt.recovered = False
+
                 attempt.provider_reference_id = (
                     execution_result.reference_id
                 )
-                attempt.error_message = execution_result.reason
+
+                attempt.error_message = (
+                    execution_result.reason
+                )
 
         except Exception as exc:
             attempt.status = "failed"
@@ -220,7 +251,7 @@ class RecoveryService:
             )
 
         # ---------------------------------------------------------
-        # 7. Mark completion only for terminal states
+        # 8. Mark completion only for terminal states
         # ---------------------------------------------------------
 
         terminal_statuses = {
@@ -242,6 +273,57 @@ class RecoveryService:
             execution_result,
         )
 
+    def _create_already_recovered_result(
+        self,
+        payment: Payment,
+        successful_attempt: RecoveryAttempt,
+    ) -> tuple[
+        RecoveryAttempt,
+        RecoveryDecision,
+        GuardrailResult,
+        RecoveryExecutionResult,
+    ]:
+        """
+        Return a blocked result when this payment has already been
+        successfully recovered.
+
+        No new RecoveryAttempt is created because recovery has
+        already succeeded and creating additional attempts would
+        incorrectly inflate recovery metrics.
+        """
+
+        reason = (
+            "Payment has already been successfully recovered. "
+            "No further recovery action will be executed."
+        )
+
+        decision = RecoveryDecision(
+            action="no_action",
+            reason=reason,
+        )
+
+        guardrail_result = GuardrailResult(
+            allowed=False,
+            reason=reason,
+        )
+
+        execution_result = RecoveryExecutionResult(
+            executed=False,
+            action="no_action",
+            status="blocked",
+            reference_id=(
+                successful_attempt.provider_reference_id
+            ),
+            reason=reason,
+        )
+
+        return (
+            successful_attempt,
+            decision,
+            guardrail_result,
+            execution_result,
+        )
+
     def _create_max_attempts_blocked_result(
         self,
         payment: Payment,
@@ -252,11 +334,12 @@ class RecoveryService:
         RecoveryExecutionResult,
     ]:
         """
-        Create a blocked recovery attempt when the maximum number
-        of allowed recovery attempts has already been reached.
+        Return a blocked result when the maximum number of recovery
+        attempts has already been reached.
 
-        The caller remains responsible for committing or rolling
-        back the transaction.
+        No new attempt is created. Otherwise repeated webhook
+        deliveries could create attempt #4, #5, #6, etc. despite
+        the configured maximum being 3.
         """
 
         reason = (
@@ -264,19 +347,14 @@ class RecoveryService:
             f"({self.MAX_RECOVERY_ATTEMPTS}) reached."
         )
 
-        attempt = RecoveryAttempt(
-            payment_id=payment.id,
-            action="no_action",
-            attempt_number=self._next_attempt_number(payment.id),
-            status="blocked",
-            recovered=False,
-            error_message=reason,
-            completed_at=datetime.now(UTC),
+        latest_attempt = self._latest_attempt(
+            payment.id
         )
 
-        self.db.add(attempt)
-        self.db.flush()
-        self.db.refresh(attempt)
+        if latest_attempt is None:
+            raise RuntimeError(
+                "Unable to find latest recovery attempt."
+            )
 
         decision = RecoveryDecision(
             action="no_action",
@@ -297,10 +375,31 @@ class RecoveryService:
         )
 
         return (
-            attempt,
+            latest_attempt,
             decision,
             guardrail_result,
             execution_result,
+        )
+
+    def _successful_recovery_attempt(
+        self,
+        payment_id: int,
+    ) -> RecoveryAttempt | None:
+        """
+        Return a successful recovery attempt if this payment has
+        already been recovered.
+        """
+
+        return (
+            self.db.query(RecoveryAttempt)
+            .filter(
+                RecoveryAttempt.payment_id == payment_id,
+                RecoveryAttempt.recovered.is_(True),
+            )
+            .order_by(
+                RecoveryAttempt.completed_at.desc()
+            )
+            .first()
         )
 
     def _attempt_count(
@@ -319,15 +418,15 @@ class RecoveryService:
             .count()
         )
 
-    def _next_attempt_number(
+    def _latest_attempt(
         self,
         payment_id: int,
-    ) -> int:
+    ) -> RecoveryAttempt | None:
         """
-        Return the next recovery attempt number for a payment.
+        Return the latest recovery attempt for a payment.
         """
 
-        latest_attempt = (
+        return (
             self.db.query(RecoveryAttempt)
             .filter(
                 RecoveryAttempt.payment_id == payment_id,
@@ -338,7 +437,20 @@ class RecoveryService:
             .first()
         )
 
+    def _next_attempt_number(
+        self,
+        payment_id: int,
+    ) -> int:
+        """
+        Return the next recovery attempt number for a payment.
+        """
+
+        latest_attempt = self._latest_attempt(
+            payment_id
+        )
+
         if latest_attempt is None:
             return 1
 
         return latest_attempt.attempt_number + 1
+    

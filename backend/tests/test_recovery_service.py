@@ -408,3 +408,46 @@ def test_executor_returning_blocked_result_is_persisted() -> None:
         (payment, "retry", True),
     ]
 
+def test_already_recovered_payment_is_not_retried() -> None:
+    db = FakeSession()
+
+    payment = make_payment("failed")
+
+    existing = RecoveryAttempt(
+        payment_id=payment.id,
+        action="retry",
+        attempt_number=1,
+        status="completed",
+        recovered=True,
+    )
+
+    db.attempts.append(existing)
+
+    executor = FakeExecutor()
+
+    service = RecoveryService(
+        db,
+        executor=executor,
+    )
+
+    (
+        attempt,
+        decision,
+        guardrail,
+        execution,
+    ) = service.evaluate_and_execute(payment)
+
+    # Existing successful recovery is returned.
+    assert attempt is existing
+    assert attempt.status == "completed"
+    assert attempt.recovered is True
+
+    # No further recovery action is permitted.
+    assert decision.action == "no_action"
+    assert guardrail.allowed is False
+
+    assert execution.executed is False
+    assert execution.status == "blocked"
+
+    # Most important: no external recovery operation is triggered.
+    assert executor.calls == []

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 from app.ml.training_dataset import TrainingDataset
 
@@ -19,26 +21,46 @@ class RecoveryPrediction:
 
 class RecoveryModel:
     """
-    Supervised ML model for payment recovery.
+    Canonical supervised ML model for payment recovery prediction.
 
-    The model learns whether a recovery attempt is likely
-    to succeed based on the payment feature vector.
+    The model estimates the probability that a failed payment can
+    be successfully recovered.
 
-    LogisticRegression is intentionally used as the first model
-    because its output is probabilistic and explainable.
+    A StandardScaler + LogisticRegression pipeline is used because
+    it provides probabilistic, explainable, and lightweight predictions.
     """
 
     def __init__(self) -> None:
-        self._model = LogisticRegression(
-            max_iter=1000,
+        self.pipeline = Pipeline(
+            [
+                (
+                    "scaler",
+                    StandardScaler(),
+                ),
+                (
+                    "classifier",
+                    LogisticRegression(
+                        max_iter=1000,
+                        random_state=42,
+                    ),
+                ),
+            ]
         )
+
         self._trained = False
 
     @property
     def is_trained(self) -> bool:
+        """
+        Return whether the model has been successfully trained.
+        """
+
         return self._trained
 
-    def train(self, dataset: TrainingDataset) -> None:
+    def train(
+        self,
+        dataset: TrainingDataset,
+    ) -> None:
         """
         Train the recovery model using a validated dataset.
         """
@@ -53,17 +75,31 @@ class RecoveryModel:
                 "Feature and label counts must match."
             )
 
-        if len(set(dataset.y)) < 2:
+        unique_labels = set(dataset.y)
+
+        if not unique_labels.issubset({0, 1}):
+            raise ValueError(
+                "Recovery model labels must be binary: 0 or 1."
+            )
+
+        if len(unique_labels) < 2:
             raise ValueError(
                 "Recovery model requires at least two outcome classes."
             )
 
-        self._model.fit(dataset.X, dataset.y)
+        self.pipeline.fit(
+            dataset.X,
+            dataset.y,
+        )
+
         self._trained = True
 
-    def predict(self, features: list[float]) -> RecoveryPrediction:
+    def predict_probability(
+        self,
+        features: list[float],
+    ) -> float:
         """
-        Predict recovery probability for one payment.
+        Predict the probability of successful payment recovery.
         """
 
         if not self._trained:
@@ -71,9 +107,21 @@ class RecoveryModel:
                 "Recovery model has not been trained."
             )
 
-        probability = float(
-            self._model.predict_proba([features])[0][1]
-        )
+        probability = self.pipeline.predict_proba(
+            [features]
+        )[0][1]
+
+        return float(probability)
+
+    def predict(
+        self,
+        features: list[float],
+    ) -> RecoveryPrediction:
+        """
+        Predict recovery probability and retry recommendation.
+        """
+
+        probability = self.predict_probability(features)
 
         return RecoveryPrediction(
             recovery_probability=probability,
