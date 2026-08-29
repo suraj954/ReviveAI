@@ -232,6 +232,7 @@ def test_successful_recovery_is_persisted() -> None:
     assert attempt.action == "retry"
     assert attempt.status == "completed"
     assert attempt.recovered is True
+    assert attempt.provider_reference_id == "retry_1"
     assert attempt.error_message is None
     assert attempt.completed_at is not None
 
@@ -284,6 +285,7 @@ def test_blocked_recovery_is_not_executed() -> None:
 
     assert execution.executed is False
     assert execution.status == "blocked"
+    assert attempt.provider_reference_id is None
 
     # Guardrails must prevent the executor from being called.
     assert executor.calls == []
@@ -331,6 +333,7 @@ def test_failed_execution_is_persisted() -> None:
     assert attempt.status == "failed"
     assert attempt.recovered is False
     assert attempt.error_message == "Gateway unavailable"
+    assert attempt.provider_reference_id is None
     assert attempt.completed_at is not None
 
     assert execution.executed is False
@@ -392,6 +395,7 @@ def test_executor_returning_blocked_result_is_persisted() -> None:
     assert attempt.status == "blocked"
     assert attempt.recovered is False
     assert attempt.error_message == execution.reason
+    assert attempt.provider_reference_id is None
 
     assert executor.calls == [
         (payment, "retry", True),

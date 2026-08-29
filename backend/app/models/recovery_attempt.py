@@ -43,6 +43,12 @@ class RecoveryAttempt(Base):
         nullable=True,
     )
 
+    provider_reference_id: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        index=True,
+    )
+
     error_message: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
@@ -66,6 +72,7 @@ class RecoveryAttempt(Base):
         attempt_number: int = 1,
         status: str = "pending",
         recovered: bool | None = None,
+        provider_reference_id: str | None = None,
         error_message: str | None = None,
         created_at: datetime | None = None,
         completed_at: datetime | None = None,
@@ -75,6 +82,7 @@ class RecoveryAttempt(Base):
         self.attempt_number = attempt_number
         self.status = status
         self.recovered = recovered
+        self.provider_reference_id = provider_reference_id
         self.error_message = error_message
         self.created_at = created_at or datetime.utcnow()
         self.completed_at = completed_at

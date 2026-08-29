@@ -169,17 +169,23 @@ class RecoveryService:
                 guardrail_result=guardrail_result,
             )
 
-            # -----------------------------------------------------
+            # ---------------------------------------------------------
             # 7. Persist execution result
-            # -----------------------------------------------------
+            # ---------------------------------------------------------
 
             if execution_result.executed:
                 attempt.status = "completed"
                 attempt.recovered = True
+                attempt.provider_reference_id = (
+                    execution_result.reference_id
+                )
                 attempt.error_message = None
             else:
                 attempt.status = execution_result.status
                 attempt.recovered = False
+                attempt.provider_reference_id = (
+                    execution_result.reference_id
+                )
                 attempt.error_message = execution_result.reason
 
         except Exception as exc:
@@ -189,6 +195,7 @@ class RecoveryService:
 
             attempt.status = "failed"
             attempt.recovered = False
+            attempt.provider_reference_id = None
             attempt.error_message = str(exc)
 
             execution_result = RecoveryExecutionResult(
