@@ -10,6 +10,9 @@ from app.config import settings
 from app.db.session import get_db
 from app.models.payment import Payment
 from app.models.webhook_event import WebhookEvent
+from app.razorpay.recovery_gateway import RazorpayRecoveryGateway
+from app.services.recovery_executor import RecoveryExecutor
+from app.services.recovery_service import RecoveryService
 
 
 router = APIRouter(
@@ -327,6 +330,44 @@ async def handle_payment_failed(
 
     payment.razorpay_payment_id = payment_id
     payment.status = "failed"
+
+    # ---------------------------------------------------------
+    # Trigger recovery workflow
+    # ---------------------------------------------------------
+
+    gateway = RazorpayRecoveryGateway()
+
+    executor = RecoveryExecutor(
+        gateway=gateway,
+    )
+
+    recovery_service = RecoveryService(
+        db=db,
+        executor=executor,
+    )
+
+    (
+        recovery_attempt,
+        recovery_decision,
+        guardrail_result,
+        execution_result,
+    ) = recovery_service.evaluate_and_execute(
+        payment,
+    )
+
+    print(
+        "Recovery workflow completed:",
+        {
+            "payment_db_id": payment.id,
+            "attempt_id": recovery_attempt.id,
+            "action": recovery_decision.action,
+            "allowed": guardrail_result.allowed,
+            "execution_status": execution_result.status,
+            "provider_reference_id": (
+                execution_result.reference_id
+            ),
+        },
+    )
 
     print(
         "Payment failed:",
