@@ -10,47 +10,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.dashboard import router as dashboard_router
 from app.api.orders import router as orders_router
 from app.api.webhooks import router as webhooks_router
-from app.db.database import SessionLocal
-from app.services.recovery_scheduler import RecoveryScheduler
+from app.services.recovery_scheduler_runner import (
+    run_recovery_scheduler_loop,
+)
 
 
 logger = logging.getLogger(__name__)
-
-
-async def recovery_scheduler_loop() -> None:
-    """
-    Run the delayed recovery scheduler continuously.
-
-    A fresh SQLAlchemy session is created for every polling cycle.
-    This prevents a long-running background task from holding onto
-    stale database state or a request-scoped session.
-    """
-
-    poll_interval_seconds = 10
-
-    while True:
-        db = SessionLocal()
-
-        try:
-            scheduler = RecoveryScheduler(db)
-
-            processed_count = scheduler.process_due_attempts()
-
-            if processed_count > 0:
-                logger.info(
-                    "Recovery scheduler processed %s due attempt(s).",
-                    processed_count,
-                )
-
-        except Exception:
-            logger.exception(
-                "Unexpected error in recovery scheduler cycle."
-            )
-
-        finally:
-            db.close()
-
-        await asyncio.sleep(poll_interval_seconds)
 
 
 @asynccontextmanager
@@ -59,33 +24,46 @@ async def lifespan(app: FastAPI):
     Manage application startup and graceful shutdown.
 
     The recovery scheduler runs as an independent background task.
-    It is cancelled cleanly when FastAPI shuts down.
+    Database polling is delegated to the dedicated scheduler runner,
+    which creates fresh sessions for each polling cycle.
     """
 
+    stop_event = asyncio.Event()
+
     scheduler_task = asyncio.create_task(
-        recovery_scheduler_loop()
+        run_recovery_scheduler_loop(
+            stop_event,
+            interval_seconds=10.0,
+            limit=50,
+        )
     )
 
-    logger.info(
-        "Recovery scheduler started."
-    )
+    logger.info("Recovery scheduler started.")
 
     try:
         yield
 
     finally:
-        logger.info(
-            "Stopping recovery scheduler."
-        )
+        logger.info("Stopping recovery scheduler.")
 
-        scheduler_task.cancel()
+        stop_event.set()
 
-        with suppress(asyncio.CancelledError):
-            await scheduler_task
+        try:
+            await asyncio.wait_for(
+                scheduler_task,
+                timeout=10.0,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Recovery scheduler did not stop gracefully; "
+                "cancelling task."
+            )
+            scheduler_task.cancel()
 
-        logger.info(
-            "Recovery scheduler stopped."
-        )
+            with suppress(asyncio.CancelledError):
+                await scheduler_task
+
+        logger.info("Recovery scheduler stopped.")
 
 
 app = FastAPI(

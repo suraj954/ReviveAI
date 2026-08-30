@@ -9,6 +9,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -36,6 +37,14 @@ class RecoveryAttempt(Base):
 
     __tablename__ = "recovery_attempts"
 
+    __table_args__ = (
+        UniqueConstraint(
+            "payment_id",
+            "attempt_number",
+            name="uq_recovery_attempt_payment_number",
+        ),
+    )
+
     # ============================================================
     # PRIMARY KEY
     # ============================================================
@@ -52,7 +61,10 @@ class RecoveryAttempt(Base):
 
     payment_id: Mapped[int] = mapped_column(
         Integer,
-        ForeignKey("payments.id"),
+        ForeignKey(
+            "payments.id",
+            ondelete="CASCADE",
+        ),
         nullable=False,
         index=True,
     )
@@ -114,6 +126,7 @@ class RecoveryAttempt(Base):
         String(50),
         nullable=False,
         default="pending",
+        index=True,
     )
 
     executed: Mapped[bool] = mapped_column(
@@ -138,12 +151,15 @@ class RecoveryAttempt(Base):
     provider_reference_id: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,
+        unique=True,
         index=True,
     )
 
     recovery_payment_id: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,
+        unique=True,
+        index=True,
     )
 
     recovered_amount: Mapped[int | None] = mapped_column(
@@ -174,6 +190,7 @@ class RecoveryAttempt(Base):
     scheduled_for: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
+        index=True,
     )
 
     completed_at: Mapped[datetime | None] = mapped_column(
