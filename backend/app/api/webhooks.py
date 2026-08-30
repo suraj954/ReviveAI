@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from datetime import UTC, datetime
 
 from fastapi import (
     APIRouter,
@@ -17,10 +16,10 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db.session import get_db
-from app.models.enums import RecoveryStatus
 from app.models.payment import Payment
 from app.models.recovery_attempt import RecoveryAttempt
 from app.models.webhook_event import WebhookEvent
+from app.services.recovery_factory import get_recovery_service
 from app.services.recovery_trigger import (
     trigger_recovery_for_payment,
 )
@@ -59,82 +58,6 @@ def verify_razorpay_signature(
 
 
 # =============================================================
-# RECOVERY STATE MANAGEMENT
-# =============================================================
-
-
-def cancel_active_recovery_attempts(
-    payment: Payment,
-    db: Session,
-) -> int:
-    """
-    Cancel active recovery attempts when the original payment
-    succeeds.
-    """
-
-    active_statuses = (
-        RecoveryStatus.PENDING.value,
-        RecoveryStatus.APPROVED.value,
-        RecoveryStatus.EXECUTING.value,
-        RecoveryStatus.AWAITING_PAYMENT.value,
-        RecoveryStatus.SCHEDULED.value,
-    )
-
-    attempts = (
-        db.query(RecoveryAttempt)
-        .filter(
-            RecoveryAttempt.payment_id == payment.id,
-            RecoveryAttempt.status.in_(active_statuses),
-        )
-        .all()
-    )
-
-    if not attempts:
-        return 0
-
-    now = datetime.now(UTC)
-
-    for attempt in attempts:
-        attempt.status = RecoveryStatus.CANCELLED.value
-        attempt.recovered = False
-        attempt.error_message = (
-            "Original payment succeeded before recovery "
-            "was completed."
-        )
-        attempt.completed_at = now
-
-    return len(attempts)
-
-
-def complete_recovery_attempt(
-    recovery_attempt: RecoveryAttempt,
-    *,
-    recovery_payment_id: str | None,
-    recovered_amount: int | None,
-) -> None:
-    """
-    Mark a recovery attempt as successfully recovered.
-
-    This is called only after a verified Razorpay success webhook.
-    """
-
-    if (
-        recovery_attempt.status
-        == RecoveryStatus.COMPLETED.value
-        and recovery_attempt.recovered is True
-    ):
-        return
-
-    recovery_attempt.status = RecoveryStatus.COMPLETED.value
-    recovery_attempt.executed = True
-    recovery_attempt.recovered = True
-    recovery_attempt.recovery_payment_id = recovery_payment_id
-    recovery_attempt.recovered_amount = recovered_amount
-    recovery_attempt.error_message = None
-    recovery_attempt.completed_at = datetime.now(UTC)
-
-
-# =============================================================
 # WEBHOOK ENDPOINT
 # =============================================================
 
@@ -155,12 +78,15 @@ async def razorpay_webhook(
 
     Transaction flow:
 
-    1. Verify and persist webhook state.
-    2. Commit the webhook transaction.
-    3. Trigger recovery independently for payment failures.
+    1. Verify webhook signature.
+    2. Validate and persist webhook event.
+    3. Process payment state changes.
+    4. Commit webhook transaction.
+    5. Trigger recovery independently for failed payments.
 
-    Recovery uses its own database session so recovery execution
-    does not run inside the webhook ingestion transaction.
+    Recovery lifecycle transitions are delegated to
+    RecoveryService so lifecycle state management and audit
+    logging remain centralized.
     """
 
     # ---------------------------------------------------------
@@ -232,7 +158,7 @@ async def razorpay_webhook(
         )
 
     # ---------------------------------------------------------
-    # Idempotency
+    # Idempotency check
     # ---------------------------------------------------------
 
     existing_event = (
@@ -279,7 +205,7 @@ async def razorpay_webhook(
         }
 
     # ---------------------------------------------------------
-    # Dispatch
+    # Dispatch event
     # ---------------------------------------------------------
 
     recovery_payment_id: int | None = None
@@ -313,7 +239,8 @@ async def razorpay_webhook(
 
         webhook_event.status = "processed"
 
-        # Commit webhook data before starting recovery.
+        # Commit webhook transaction before triggering
+        # independent recovery execution.
         db.commit()
 
     except Exception as exc:
@@ -344,8 +271,9 @@ async def razorpay_webhook(
             )
 
         except Exception as exc:
-            # Webhook processing already succeeded and committed.
-            # Do not return HTTP 500 and cause unnecessary retries.
+            # The webhook itself was successfully processed.
+            # Do not return HTTP 500 because that would cause
+            # unnecessary provider retries and duplicate events.
             print(
                 "Recovery trigger failed:",
                 {
@@ -375,8 +303,10 @@ async def handle_payment_failed(
     Persist failed payment state.
 
     Recovery execution is intentionally not performed inside the
-    webhook transaction. The caller triggers recovery only after
-    the failed payment state has been committed.
+    webhook transaction.
+
+    The caller triggers recovery only after the failed payment
+    state has been successfully committed.
 
     Returns:
         Database ID of the failed payment.
@@ -436,11 +366,14 @@ async def handle_payment_captured(
     db: Session,
 ) -> None:
     """
-    Handle captured payments.
+    Handle captured Razorpay payments.
 
     A captured payment may belong to:
-    1. A recovery order.
-    2. The original merchant order.
+
+    1. A recovery order created by ReviveAI.
+    2. The original merchant payment.
+
+    Recovery lifecycle completion is delegated to RecoveryService.
     """
 
     payment_data = (
@@ -450,11 +383,11 @@ async def handle_payment_captured(
         .get("entity", {})
     )
 
-    payment_id = payment_data.get("id")
+    razorpay_payment_id = payment_data.get("id")
     order_id = payment_data.get("order_id")
     amount = payment_data.get("amount")
 
-    if not payment_id:
+    if not razorpay_payment_id:
         raise ValueError(
             "payment.captured event missing payment ID."
         )
@@ -465,7 +398,7 @@ async def handle_payment_captured(
         )
 
     # ---------------------------------------------------------
-    # Recovery payment
+    # Check whether this is a recovery payment
     # ---------------------------------------------------------
 
     recovery_attempt = (
@@ -478,9 +411,11 @@ async def handle_payment_captured(
     )
 
     if recovery_attempt:
-        complete_recovery_attempt(
+        recovery_service = get_recovery_service(db)
+
+        recovery_service.complete_from_provider_webhook(
             recovery_attempt,
-            recovery_payment_id=payment_id,
+            recovery_payment_id=razorpay_payment_id,
             recovered_amount=amount,
         )
 
@@ -500,14 +435,22 @@ async def handle_payment_captured(
 
     if not payment:
         raise ValueError(
-            f"Payment record not found for Razorpay order "
+            "Payment record not found for Razorpay order "
             f"{order_id}."
         )
 
-    payment.razorpay_payment_id = payment_id
+    payment.razorpay_payment_id = razorpay_payment_id
 
     if payment.status != "paid":
         payment.status = "captured"
+
+    # Original payment succeeded, so any active recovery
+    # attempts must be cancelled.
+    recovery_service = get_recovery_service(db)
+
+    recovery_service.cancel_active_attempts_for_payment(
+        payment
+    )
 
 
 async def handle_order_paid(
@@ -516,6 +459,14 @@ async def handle_order_paid(
 ) -> None:
     """
     Handle successful Razorpay orders.
+
+    An order may belong to:
+
+    1. A recovery order.
+    2. The original merchant payment.
+
+    Recovery lifecycle transitions are delegated to
+    RecoveryService.
     """
 
     order = (
@@ -533,7 +484,7 @@ async def handle_order_paid(
         )
 
     # ---------------------------------------------------------
-    # Recovery order
+    # Check whether this is a recovery order
     # ---------------------------------------------------------
 
     recovery_attempt = (
@@ -546,7 +497,9 @@ async def handle_order_paid(
     )
 
     if recovery_attempt:
-        complete_recovery_attempt(
+        recovery_service = get_recovery_service(db)
+
+        recovery_service.complete_from_provider_webhook(
             recovery_attempt,
             recovery_payment_id=None,
             recovered_amount=order.get(
@@ -576,9 +529,13 @@ async def handle_order_paid(
 
     payment.status = "paid"
 
-    cancel_active_recovery_attempts(
-        payment,
-        db,
+    # Original payment succeeded before recovery completed.
+    # Cancel any active recovery attempts through the centralized
+    # lifecycle service.
+    recovery_service = get_recovery_service(db)
+
+    recovery_service.cancel_active_attempts_for_payment(
+        payment
     )
 
 
@@ -587,8 +544,10 @@ async def handle_payment_link_paid(
     db: Session,
 ) -> None:
     """
-    Payment links are currently observed but not mapped directly
-    into the ReviveAI payment recovery lifecycle.
+    Observe successful payment links.
+
+    Payment links are currently logged but are not yet mapped
+    directly into the ReviveAI recovery lifecycle.
     """
 
     payment_link = (

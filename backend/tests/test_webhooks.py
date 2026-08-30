@@ -109,9 +109,20 @@ class FakeRecoveryAttempt:
         self.id = id
         self.payment_id = payment_id
         self.provider_reference_id = provider_reference_id
+
         self.status = "awaiting_payment"
+        self.executed = True
         self.recovered = None
+
+        self.recovery_payment_id = None
+        self.recovered_amount = None
+        self.error_message = None
+
         self.completed_at = None
+        self.updated_at = None
+
+        self.action = "retry"
+        self.attempt_number = 1
 
 
 class FakeQuery:
@@ -130,13 +141,29 @@ class FakeQuery:
     def first(self):
         return self.result
 
+    def all(self):
+        if self.result is None:
+            return []
+
+        return [self.result]
+
 
 class FakeSession:
+    """
+    Lightweight SQLAlchemy session replacement used for webhook
+    handler unit tests.
+
+    It implements the minimum session interface required by both
+    webhook handlers and RecoveryService lifecycle methods.
+    """
+
     def __init__(
         self,
         recovery_attempt,
     ) -> None:
         self.recovery_attempt = recovery_attempt
+        self.added = []
+        self.flushed = False
 
     def query(
         self,
@@ -145,6 +172,15 @@ class FakeSession:
         return FakeQuery(
             self.recovery_attempt,
         )
+
+    def add(
+        self,
+        obj,
+    ) -> None:
+        self.added.append(obj)
+
+    def flush(self) -> None:
+        self.flushed = True
 
 
 @pytest.mark.asyncio
@@ -181,5 +217,20 @@ async def test_recovery_payment_capture_marks_attempt_recovered() -> None:
     )
 
     assert recovery_attempt.status == "completed"
+    assert recovery_attempt.executed is True
     assert recovery_attempt.recovered is True
+
+    assert (
+        recovery_attempt.recovery_payment_id
+        == "pay_recovery_123"
+    )
+
+    assert (
+        recovery_attempt.recovered_amount
+        == 50000
+    )
+
+    assert recovery_attempt.error_message is None
     assert recovery_attempt.completed_at is not None
+
+    assert db.flushed is True

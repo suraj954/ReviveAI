@@ -21,23 +21,25 @@ from app.services.recovery_executor import (
 
 class RecoveryService:
     """
-    Coordinates the complete recovery lifecycle.
+    Coordinates the complete payment recovery lifecycle.
 
     Responsibilities:
 
     1. Prevent invalid recovery attempts.
-    2. Ask the AI recovery agent for a decision.
+    2. Ask the AI recovery agent for a recovery decision.
     3. Apply guardrail results.
     4. Persist recovery attempts.
     5. Execute immediate recovery actions.
     6. Schedule delayed recovery actions.
     7. Record immutable audit events.
-    8. Provide lifecycle transition helpers for the scheduler.
+    8. Provide centralized lifecycle transition helpers.
 
-    This service does NOT declare revenue recovered.
+    Important:
+    A recovery attempt being executed does NOT mean revenue has
+    been recovered.
 
-    Recovery is successful only when a verified provider webhook
-    confirms payment success.
+    Recovery is considered successful only after a verified provider
+    webhook confirms successful payment completion.
     """
 
     MAX_RECOVERY_ATTEMPTS = 3
@@ -55,11 +57,12 @@ class RecoveryService:
         self.audit = RecoveryAuditService(db)
 
     # ============================================================
-    # TIME
+    # TIME HELPERS
     # ============================================================
 
     @staticmethod
     def _now() -> datetime:
+        """Return the current UTC timestamp."""
         return datetime.now(timezone.utc)
 
     # ============================================================
@@ -75,7 +78,7 @@ class RecoveryService:
         metadata: dict | None = None,
     ) -> None:
         """
-        Record an audit event when the attempt has a persisted ID.
+        Record an immutable audit event.
 
         The ID check keeps lightweight unit-test FakeSession objects
         compatible while production SQLAlchemy sessions persist the
@@ -102,7 +105,7 @@ class RecoveryService:
         metadata: dict | None = None,
     ) -> None:
         """
-        Record a standardized lifecycle transition audit event.
+        Record a standardized lifecycle state transition.
         """
 
         if getattr(attempt, "id", None) is None:
@@ -127,6 +130,10 @@ class RecoveryService:
         RecoveryDecision,
         GuardrailResult,
     ]:
+        """
+        Build a standardized no-action decision.
+        """
+
         decision = RecoveryDecision(
             action=RecoveryAction.NO_ACTION.value,
             reason=reason,
@@ -149,6 +156,10 @@ class RecoveryService:
         executed: bool = False,
         reference_id: str | None = None,
     ) -> RecoveryExecutionResult:
+        """
+        Build a standardized execution result.
+        """
+
         return RecoveryExecutionResult(
             executed=executed,
             action=action,
@@ -158,13 +169,17 @@ class RecoveryService:
         )
 
     # ============================================================
-    # PAYMENT STATE
+    # PAYMENT STATE HELPERS
     # ============================================================
 
     def _is_terminal_payment(
         self,
         payment: Payment,
     ) -> bool:
+        """
+        Return True when the original payment is already successful.
+        """
+
         return str(payment.status).lower() in {
             "captured",
             "paid",
@@ -181,10 +196,10 @@ class RecoveryService:
         payment_id: int,
     ) -> list[RecoveryAttempt]:
         """
-        Fetch recovery attempts for a payment.
+        Fetch all recovery attempts for a payment.
 
-        Supports both SQLAlchemy and lightweight FakeSession objects
-        used by the test suite.
+        Supports both real SQLAlchemy sessions and lightweight
+        FakeSession objects used in tests.
         """
 
         query = (
@@ -194,18 +209,17 @@ class RecoveryService:
             )
         )
 
+        # Support lightweight test doubles.
         if hasattr(query, "items"):
             return [
                 attempt
                 for attempt in query.items
-                if (
-                    getattr(
-                        attempt,
-                        "payment_id",
-                        None,
-                    )
-                    == payment_id
+                if getattr(
+                    attempt,
+                    "payment_id",
+                    None,
                 )
+                == payment_id
             ]
 
         return query.all()
@@ -214,9 +228,11 @@ class RecoveryService:
         self,
         payment_id: int,
     ) -> bool:
-        attempts = self._get_attempts(
-            payment_id
-        )
+        """
+        Check whether any previous recovery attempt succeeded.
+        """
+
+        attempts = self._get_attempts(payment_id)
 
         return any(
             getattr(
@@ -232,6 +248,10 @@ class RecoveryService:
         self,
         payment_id: int,
     ) -> int:
+        """
+        Count all recovery attempts for a payment.
+        """
+
         return len(
             self._get_attempts(payment_id)
         )
@@ -240,9 +260,11 @@ class RecoveryService:
         self,
         payment_id: int,
     ) -> int:
-        attempts = self._get_attempts(
-            payment_id
-        )
+        """
+        Calculate the next sequential recovery attempt number.
+        """
+
+        attempts = self._get_attempts(payment_id)
 
         if not attempts:
             return 1
@@ -271,9 +293,11 @@ class RecoveryService:
         attempt: RecoveryAttempt,
     ) -> None:
         """
-        Atomically transition:
+        Transition:
 
             scheduled -> executing
+
+        Called by the recovery scheduler before provider execution.
         """
 
         if (
@@ -286,9 +310,7 @@ class RecoveryService:
 
         previous_status = attempt.status
 
-        attempt.status = (
-            RecoveryStatus.EXECUTING.value
-        )
+        attempt.status = RecoveryStatus.EXECUTING.value
         attempt.executed = False
         attempt.updated_at = self._now()
 
@@ -323,9 +345,11 @@ class RecoveryService:
         provider_reference_id: str,
     ) -> None:
         """
-        Transition:
+        Transition an executed recovery attempt to awaiting_payment.
 
-            executing -> awaiting_payment
+        This state means the provider-side recovery checkout/order
+        was successfully created, but payment success has not yet
+        been verified.
         """
 
         if not provider_reference_id:
@@ -340,9 +364,7 @@ class RecoveryService:
         )
         attempt.executed = True
         attempt.recovered = None
-        attempt.provider_reference_id = (
-            provider_reference_id
-        )
+        attempt.provider_reference_id = provider_reference_id
         attempt.error_message = None
         attempt.executed_at = self._now()
         attempt.completed_at = None
@@ -386,9 +408,7 @@ class RecoveryService:
 
         previous_status = attempt.status
 
-        attempt.status = (
-            RecoveryStatus.FAILED.value
-        )
+        attempt.status = RecoveryStatus.FAILED.value
         attempt.executed = False
         attempt.recovered = False
         attempt.error_message = reason
@@ -400,9 +420,7 @@ class RecoveryService:
             attempt,
             from_status=previous_status,
             to_status=RecoveryStatus.FAILED.value,
-            description=(
-                "Recovery execution failed."
-            ),
+            description="Recovery execution failed.",
             metadata={
                 "reason": reason,
             },
@@ -425,22 +443,16 @@ class RecoveryService:
         Mark a recovery attempt as successfully completed.
 
         This method should only be called after a verified provider
-        success event.
+        success webhook confirms the recovery payment.
         """
 
         previous_status = attempt.status
 
-        attempt.status = (
-            RecoveryStatus.COMPLETED.value
-        )
+        attempt.status = RecoveryStatus.COMPLETED.value
         attempt.executed = True
         attempt.recovered = True
-        attempt.recovery_payment_id = (
-            recovery_payment_id
-        )
-        attempt.recovered_amount = (
-            recovered_amount
-        )
+        attempt.recovery_payment_id = recovery_payment_id
+        attempt.recovered_amount = recovered_amount
         attempt.error_message = None
         attempt.completed_at = self._now()
 
@@ -484,9 +496,8 @@ class RecoveryService:
 
         previous_status = attempt.status
 
-        attempt.status = (
-            RecoveryStatus.CANCELLED.value
-        )
+        attempt.status = RecoveryStatus.CANCELLED.value
+        attempt.executed = False
         attempt.recovered = False
         attempt.error_message = reason
         attempt.completed_at = self._now()
@@ -497,9 +508,7 @@ class RecoveryService:
             attempt,
             from_status=previous_status,
             to_status=RecoveryStatus.CANCELLED.value,
-            description=(
-                "Recovery attempt was cancelled."
-            ),
+            description="Recovery attempt was cancelled.",
             metadata={
                 "reason": reason,
             },
@@ -510,6 +519,99 @@ class RecoveryService:
             event_type=RecoveryEventType.CANCELLED.value,
             description=reason,
         )
+
+    def complete_from_provider_webhook(
+        self,
+        attempt: RecoveryAttempt,
+        *,
+        recovery_payment_id: str | None,
+        recovered_amount: int | None,
+    ) -> None:
+        """
+        Complete a recovery attempt after a verified provider webhook.
+
+        Intentionally idempotent because payment providers may send
+        duplicate webhook events.
+        """
+
+        if (
+            attempt.status
+            == RecoveryStatus.COMPLETED.value
+            and attempt.recovered is True
+        ):
+            return
+
+        self.mark_completed(
+            attempt,
+            recovery_payment_id=recovery_payment_id,
+            recovered_amount=recovered_amount,
+        )
+
+    def cancel_active_attempts_for_payment(
+        self,
+        payment: Payment,
+        *,
+        reason: str = (
+            "Original payment succeeded before recovery "
+            "was completed."
+        ),
+    ) -> int:
+        """
+        Cancel all active recovery attempts for a payment.
+
+        Called when a verified webhook confirms that the original
+        payment succeeded.
+
+        Every cancellation passes through mark_cancelled() so that
+        lifecycle state changes and audit events remain centralized.
+        """
+
+        active_statuses = (
+            RecoveryStatus.PENDING.value,
+            RecoveryStatus.APPROVED.value,
+            RecoveryStatus.EXECUTING.value,
+            RecoveryStatus.AWAITING_PAYMENT.value,
+            RecoveryStatus.SCHEDULED.value,
+        )
+
+        query = (
+            self.db.query(RecoveryAttempt)
+            .filter(
+                RecoveryAttempt.payment_id == payment.id,
+                RecoveryAttempt.status.in_(active_statuses),
+            )
+        )
+
+        # Support lightweight test doubles.
+        if hasattr(query, "items"):
+            attempts = [
+                attempt
+                for attempt in query.items
+                if (
+                    getattr(
+                        attempt,
+                        "payment_id",
+                        None,
+                    )
+                    == payment.id
+                    and getattr(
+                        attempt,
+                        "status",
+                        None,
+                    )
+                    in active_statuses
+                )
+            ]
+        else:
+            attempts = query.all()
+
+        for attempt in attempts:
+            self.mark_cancelled(
+                attempt,
+                reason=reason,
+            )
+
+        return len(attempts)
 
     # ============================================================
     # DECISION + RECORDING
@@ -524,39 +626,49 @@ class RecoveryService:
         GuardrailResult,
     ]:
         """
-        Evaluate a payment for recovery and persist an attempt when
+        Evaluate a failed payment and persist a recovery attempt when
         an executable recovery action is selected.
         """
 
+        # --------------------------------------------------------
+        # Original payment already succeeded
+        # --------------------------------------------------------
+
         if self._is_terminal_payment(payment):
-            decision, guardrail = (
-                self._no_action_result(
-                    "Payment is already completed."
-                )
+            decision, guardrail = self._no_action_result(
+                "Payment is already completed."
             )
 
             return None, decision, guardrail
+
+        # --------------------------------------------------------
+        # Recovery already succeeded
+        # --------------------------------------------------------
 
         if self._already_recovered(payment.id):
-            decision, guardrail = (
-                self._no_action_result(
-                    "Payment has already been recovered."
-                )
+            decision, guardrail = self._no_action_result(
+                "Payment has already been recovered."
             )
 
             return None, decision, guardrail
+
+        # --------------------------------------------------------
+        # Maximum retry limit
+        # --------------------------------------------------------
 
         if (
             self._attempt_count(payment.id)
             >= self.MAX_RECOVERY_ATTEMPTS
         ):
-            decision, guardrail = (
-                self._no_action_result(
-                    "Maximum recovery limit reached."
-                )
+            decision, guardrail = self._no_action_result(
+                "Maximum recovery limit reached."
             )
 
             return None, decision, guardrail
+
+        # --------------------------------------------------------
+        # AI evaluation
+        # --------------------------------------------------------
 
         if self.agent is None:
             raise RuntimeError(
@@ -569,11 +681,19 @@ class RecoveryService:
             )
         )
 
+        # --------------------------------------------------------
+        # No action
+        # --------------------------------------------------------
+
         if (
             decision.action
             == RecoveryAction.NO_ACTION.value
         ):
             return None, decision, guardrail
+
+        # --------------------------------------------------------
+        # Create recovery attempt
+        # --------------------------------------------------------
 
         attempt = RecoveryAttempt(
             payment_id=payment.id,
@@ -599,21 +719,21 @@ class RecoveryService:
                 RecoveryStatus.BLOCKED.value
             )
             attempt.recovered = False
-            attempt.error_message = (
-                guardrail.reason
-            )
+            attempt.error_message = guardrail.reason
             attempt.completed_at = self._now()
 
         self.db.add(attempt)
         self.db.flush()
 
         # --------------------------------------------------------
-        # AUDIT: Attempt created
+        # AUDIT: ATTEMPT CREATED
         # --------------------------------------------------------
 
         self._record_event(
             attempt,
-            event_type=RecoveryEventType.ATTEMPT_CREATED.value,
+            event_type=(
+                RecoveryEventType.ATTEMPT_CREATED.value
+            ),
             description=(
                 "Recovery attempt was created after payment "
                 "failure evaluation."
@@ -628,12 +748,14 @@ class RecoveryService:
         )
 
         # --------------------------------------------------------
-        # AUDIT: AI decision
+        # AUDIT: AI DECISION
         # --------------------------------------------------------
 
         self._record_event(
             attempt,
-            event_type=RecoveryEventType.DECISION_MADE.value,
+            event_type=(
+                RecoveryEventType.DECISION_MADE.value
+            ),
             description=decision.reason,
             metadata={
                 "action": decision.action,
@@ -644,16 +766,14 @@ class RecoveryService:
         )
 
         # --------------------------------------------------------
-        # AUDIT: Guardrail result
+        # AUDIT: GUARDRAIL RESULT
         # --------------------------------------------------------
 
         if guardrail.allowed:
             self._record_event(
                 attempt,
                 event_type=(
-                    RecoveryEventType
-                    .GUARDRAIL_APPROVED
-                    .value
+                    RecoveryEventType.GUARDRAIL_APPROVED.value
                 ),
                 description=guardrail.reason,
                 metadata={
@@ -664,9 +784,7 @@ class RecoveryService:
             self._record_event(
                 attempt,
                 event_type=(
-                    RecoveryEventType
-                    .GUARDRAIL_BLOCKED
-                    .value
+                    RecoveryEventType.GUARDRAIL_BLOCKED.value
                 ),
                 description=guardrail.reason,
                 metadata={
@@ -702,9 +820,11 @@ class RecoveryService:
             attempt,
             decision,
             guardrail,
-        ) = self.evaluate_and_record(
-            payment
-        )
+        ) = self.evaluate_and_record(payment)
+
+        # --------------------------------------------------------
+        # No recovery attempt
+        # --------------------------------------------------------
 
         if attempt is None:
             execution = self._execution_result(
@@ -719,6 +839,10 @@ class RecoveryService:
                 guardrail,
                 execution,
             )
+
+        # --------------------------------------------------------
+        # Guardrail blocked
+        # --------------------------------------------------------
 
         if not guardrail.allowed:
             execution = self._execution_result(
@@ -830,6 +954,10 @@ class RecoveryService:
             )
             raise
 
+        # --------------------------------------------------------
+        # Provider execution succeeded
+        # --------------------------------------------------------
+
         if execution.executed:
             if not execution.reference_id:
                 self.mark_execution_failed(
@@ -851,6 +979,10 @@ class RecoveryService:
                     execution.reference_id
                 ),
             )
+
+        # --------------------------------------------------------
+        # Provider execution failed
+        # --------------------------------------------------------
 
         else:
             self.mark_execution_failed(
