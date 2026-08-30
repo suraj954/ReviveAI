@@ -17,14 +17,12 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db.session import get_db
-from app.models.enums import (
-    RecoveryStatus,
-)
+from app.models.enums import RecoveryStatus
 from app.models.payment import Payment
 from app.models.recovery_attempt import RecoveryAttempt
 from app.models.webhook_event import WebhookEvent
-from app.services.recovery_factory import (
-    get_recovery_service,
+from app.services.recovery_trigger import (
+    trigger_recovery_for_payment,
 )
 
 
@@ -97,9 +95,7 @@ def cancel_active_recovery_attempts(
     now = datetime.now(UTC)
 
     for attempt in attempts:
-        attempt.status = (
-            RecoveryStatus.CANCELLED.value
-        )
+        attempt.status = RecoveryStatus.CANCELLED.value
         attempt.recovered = False
         attempt.error_message = (
             "Original payment succeeded before recovery "
@@ -129,21 +125,13 @@ def complete_recovery_attempt(
     ):
         return
 
-    recovery_attempt.status = (
-        RecoveryStatus.COMPLETED.value
-    )
+    recovery_attempt.status = RecoveryStatus.COMPLETED.value
     recovery_attempt.executed = True
     recovery_attempt.recovered = True
-    recovery_attempt.recovery_payment_id = (
-        recovery_payment_id
-    )
-    recovery_attempt.recovered_amount = (
-        recovered_amount
-    )
+    recovery_attempt.recovery_payment_id = recovery_payment_id
+    recovery_attempt.recovered_amount = recovered_amount
     recovery_attempt.error_message = None
-    recovery_attempt.completed_at = datetime.now(
-        UTC
-    )
+    recovery_attempt.completed_at = datetime.now(UTC)
 
 
 # =============================================================
@@ -164,6 +152,15 @@ async def razorpay_webhook(
 ):
     """
     Receive and process Razorpay webhook events.
+
+    Transaction flow:
+
+    1. Verify and persist webhook state.
+    2. Commit the webhook transaction.
+    3. Trigger recovery independently for payment failures.
+
+    Recovery uses its own database session so recovery execution
+    does not run inside the webhook ingestion transaction.
     """
 
     # ---------------------------------------------------------
@@ -256,7 +253,7 @@ async def razorpay_webhook(
         }
 
     # ---------------------------------------------------------
-    # Persist event
+    # Persist webhook event
     # ---------------------------------------------------------
 
     webhook_event = WebhookEvent(
@@ -285,11 +282,15 @@ async def razorpay_webhook(
     # Dispatch
     # ---------------------------------------------------------
 
+    recovery_payment_id: int | None = None
+
     try:
         if event == "payment.failed":
-            await handle_payment_failed(
-                payload,
-                db,
+            recovery_payment_id = (
+                await handle_payment_failed(
+                    payload,
+                    db,
+                )
             )
 
         elif event == "payment.captured":
@@ -312,6 +313,7 @@ async def razorpay_webhook(
 
         webhook_event.status = "processed"
 
+        # Commit webhook data before starting recovery.
         db.commit()
 
     except Exception as exc:
@@ -331,6 +333,27 @@ async def razorpay_webhook(
             detail="Webhook processing failed.",
         ) from exc
 
+    # ---------------------------------------------------------
+    # Trigger recovery AFTER successful webhook commit
+    # ---------------------------------------------------------
+
+    if recovery_payment_id is not None:
+        try:
+            trigger_recovery_for_payment(
+                recovery_payment_id
+            )
+
+        except Exception as exc:
+            # Webhook processing already succeeded and committed.
+            # Do not return HTTP 500 and cause unnecessary retries.
+            print(
+                "Recovery trigger failed:",
+                {
+                    "payment_id": recovery_payment_id,
+                    "error": str(exc),
+                },
+            )
+
     return {
         "success": True,
         "event": event,
@@ -347,9 +370,16 @@ async def razorpay_webhook(
 async def handle_payment_failed(
     payload: dict,
     db: Session,
-) -> None:
+) -> int:
     """
-    Persist failed payment state and trigger recovery evaluation.
+    Persist failed payment state.
+
+    Recovery execution is intentionally not performed inside the
+    webhook transaction. The caller triggers recovery only after
+    the failed payment state has been committed.
+
+    Returns:
+        Database ID of the failed payment.
     """
 
     payment_data = (
@@ -359,10 +389,10 @@ async def handle_payment_failed(
         .get("entity", {})
     )
 
-    payment_id = payment_data.get("id")
+    razorpay_payment_id = payment_data.get("id")
     order_id = payment_data.get("order_id")
 
-    if not payment_id:
+    if not razorpay_payment_id:
         raise ValueError(
             "payment.failed event missing payment ID."
         )
@@ -386,7 +416,7 @@ async def handle_payment_failed(
             f"Razorpay order {order_id}."
         )
 
-    payment.razorpay_payment_id = payment_id
+    payment.razorpay_payment_id = razorpay_payment_id
     payment.status = "failed"
     payment.failure_code = payment_data.get(
         "error_code"
@@ -398,38 +428,7 @@ async def handle_payment_failed(
         "error_description"
     )
 
-    recovery_service = get_recovery_service(
-        db=db
-    )
-
-    (
-        recovery_attempt,
-        recovery_decision,
-        guardrail_result,
-        execution_result,
-    ) = recovery_service.evaluate_and_execute(
-        payment
-    )
-
-    print(
-        "Recovery workflow completed:",
-        {
-            "payment_db_id": payment.id,
-            "attempt_id": (
-                recovery_attempt.id
-                if recovery_attempt is not None
-                else None
-            ),
-            "action": recovery_decision.action,
-            "allowed": guardrail_result.allowed,
-            "execution_status": (
-                execution_result.status
-            ),
-            "provider_reference_id": (
-                execution_result.reference_id
-            ),
-        },
-    )
+    return payment.id
 
 
 async def handle_payment_captured(
@@ -550,8 +549,8 @@ async def handle_order_paid(
         complete_recovery_attempt(
             recovery_attempt,
             recovery_payment_id=None,
-            recovered_amount=(
-                order.get("amount_paid")
+            recovered_amount=order.get(
+                "amount_paid"
             ),
         )
 

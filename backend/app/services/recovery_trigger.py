@@ -7,10 +7,24 @@ def trigger_recovery_for_payment(
     payment_id: int,
 ) -> None:
     """
-    Trigger the recovery workflow for a persisted payment.
+    Trigger the recovery workflow for an already persisted payment.
 
-    This function creates its own database session so recovery
-    orchestration remains independent from webhook ingestion.
+    This function owns an independent database session and transaction,
+    keeping recovery orchestration separate from webhook ingestion.
+
+    Flow:
+
+        Persisted failed payment
+                ↓
+        Load payment in independent session
+                ↓
+        Build recovery service
+                ↓
+        AI decision + guardrails
+                ↓
+        Execute or schedule recovery
+                ↓
+        Commit recovery transaction
     """
 
     db = SessionLocal()
@@ -30,10 +44,17 @@ def trigger_recovery_for_payment(
             )
 
         recovery_service = get_recovery_service(db)
+        
 
         recovery_service.evaluate_and_execute(
             payment,
         )
+
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        raise
 
     finally:
         db.close()
