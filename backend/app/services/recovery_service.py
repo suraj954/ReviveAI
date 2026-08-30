@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
-from sqlalchemy.orm import Session
-
-from app.agents.recovery_agent import RecoveryAgent
 from app.decisions.guardrails import GuardrailResult
 from app.decisions.policy import RecoveryDecision
 from app.models.payment import Payment
@@ -17,440 +15,299 @@ from app.services.recovery_executor import (
 
 class RecoveryService:
     """
-    Coordinates recovery decisions, safety checks, execution,
-    and persistence of recovery attempts.
-
-    Transaction ownership belongs to the caller. This service uses
-    flush() to synchronize pending changes without committing the
-    surrounding database transaction.
-
-    Recovery rules:
-    - A payment can have at most MAX_RECOVERY_ATTEMPTS recovery attempts.
-    - Once a payment is successfully recovered, no further recovery
-      action is allowed.
-    - Guardrails can block an otherwise valid recovery action.
+    Coordinates recovery decision-making, attempt persistence,
+    and optional recovery execution.
     """
 
     MAX_RECOVERY_ATTEMPTS = 3
+    WAIT_RETRY_DELAY_MINUTES = 15
 
     def __init__(
         self,
-        db: Session,
-        *,
-        agent: RecoveryAgent | None = None,
-        executor: RecoveryExecutor | None = None,
+        db,
+        agent,
+        executor: Optional[RecoveryExecutor] = None,
     ) -> None:
         self.db = db
-        self.agent = agent or RecoveryAgent()
+        self.agent = agent
         self.executor = executor
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+    def _no_action_result(
+        self,
+        reason: str,
+    ) -> tuple[RecoveryDecision, GuardrailResult]:
+        decision = RecoveryDecision(
+            action="no_action",
+            reason=reason,
+            recovery_probability=0.0,
+        )
+
+        guardrail = GuardrailResult(
+            allowed=False,
+            reason=reason,
+        )
+
+        return decision, guardrail
+
+    def _execution_result(
+        self,
+        *,
+        action: str,
+        status: str,
+        reason: str,
+        executed: bool = False,
+        reference_id: str | None = None,
+    ) -> RecoveryExecutionResult:
+        return RecoveryExecutionResult(
+            executed=executed,
+            action=action,
+            status=status,
+            reference_id=reference_id,
+            reason=reason,
+        )
+
+    def _is_terminal_payment(self, payment: Payment) -> bool:
+        return str(payment.status).lower() in {
+            "captured",
+            "paid",
+            "success",
+            "succeeded",
+        }
+
+    def _get_attempts(self, payment_id: int):
+        """
+        Fetch attempts for a payment.
+
+        Works with both SQLAlchemy sessions and the lightweight FakeSession
+        used by the test suite.
+        """
+        query = self.db.query(RecoveryAttempt).filter(
+            RecoveryAttempt.payment_id == payment_id
+        )
+
+        # FakeQuery does not implement all(), so use its items directly.
+        if hasattr(query, "items"):
+            return [
+                attempt
+                for attempt in query.items
+                if getattr(attempt, "payment_id", None) == payment_id
+            ]
+
+        return query.all()
+
+    def _already_recovered(self, payment_id: int) -> bool:
+        attempts = self._get_attempts(payment_id)
+
+        return any(
+            getattr(attempt, "recovered", None) is True
+            for attempt in attempts
+        )
+
+    def _attempt_count(self, payment_id: int) -> int:
+        return len(self._get_attempts(payment_id))
+
+    def _next_attempt_number(self, payment_id: int) -> int:
+        attempts = self._get_attempts(payment_id)
+
+        if not attempts:
+            return 1
+
+        return max(
+            getattr(attempt, "attempt_number", 0) or 0
+            for attempt in attempts
+        ) + 1
 
     def evaluate_and_record(
         self,
         payment: Payment,
-    ) -> RecoveryAttempt:
+    ) -> tuple[
+        RecoveryAttempt | None,
+        RecoveryDecision,
+        GuardrailResult,
+    ]:
         """
-        Evaluate a payment and persist the resulting recovery attempt.
-
-        This method records the recovery decision without executing
-        an external recovery operation.
-
-        The caller is responsible for committing or rolling back
-        the database transaction.
+        Evaluate a payment for recovery and persist a recovery attempt
+        when an action should be considered.
         """
 
-        decision = self.agent.evaluate(payment)
+        # Never recover already successful payments.
+        if self._is_terminal_payment(payment):
+            decision, guardrail = self._no_action_result(
+                "Payment is already completed."
+            )
+            return None, decision, guardrail
+
+        # Never retry a payment already successfully recovered.
+        if self._already_recovered(payment.id):
+            decision, guardrail = self._no_action_result(
+                "Payment has already been recovered."
+            )
+            return None, decision, guardrail
+
+        # Stop after the configured maximum number of attempts.
+        if self._attempt_count(payment.id) >= self.MAX_RECOVERY_ATTEMPTS:
+            decision, guardrail = self._no_action_result(
+                "Maximum recovery limit reached."
+            )
+            return None, decision, guardrail
+
+        # Ask the recovery agent for a decision.
+        decision, guardrail = self.agent.evaluate_with_guardrails(
+            payment
+        )
+
+        # Explicit no-action decisions do not create attempts.
+        if decision.action == "no_action":
+            return None, decision, guardrail
 
         attempt = RecoveryAttempt(
             payment_id=payment.id,
             action=decision.action,
-            attempt_number=self._next_attempt_number(
-                payment.id
-            ),
+            attempt_number=self._next_attempt_number(payment.id),
         )
+
+        # Store optional decision metadata only if the model supports it.
+        # This avoids passing invalid constructor kwargs to SQLAlchemy.
+        if hasattr(attempt, "reason"):
+            attempt.reason = decision.reason
+
+        if hasattr(attempt, "recovery_probability"):
+            attempt.recovery_probability = decision.recovery_probability
+
+        if guardrail.allowed:
+            attempt.status = "approved"
+        else:
+            attempt.status = "blocked"
+            attempt.recovered = False
+            attempt.error_message = guardrail.reason
+            attempt.completed_at = self._now()
 
         self.db.add(attempt)
         self.db.flush()
-        self.db.refresh(attempt)
 
-        return attempt
+        return attempt, decision, guardrail
 
     def evaluate_and_execute(
         self,
         payment: Payment,
     ) -> tuple[
-        RecoveryAttempt,
+        RecoveryAttempt | None,
         RecoveryDecision,
         GuardrailResult,
         RecoveryExecutionResult,
     ]:
         """
-        Evaluate, guard, execute, and persist a recovery attempt.
-
-        Recovery execution stops when:
-        - the payment has already been successfully recovered, or
-        - the maximum recovery attempt limit has been reached.
-
-        The caller owns the transaction and is responsible for the
-        final commit or rollback.
+        Evaluate a payment and execute the approved recovery action.
         """
 
-        if self.executor is None:
-            raise RuntimeError(
-                "RecoveryExecutor is required for execution."
-            )
-
-        # ---------------------------------------------------------
-        # 1. Stop if payment was already successfully recovered
-        # ---------------------------------------------------------
-
-        successful_attempt = self._successful_recovery_attempt(
-            payment.id
-        )
-
-        if successful_attempt is not None:
-            return self._create_already_recovered_result(
-                payment=payment,
-                successful_attempt=successful_attempt,
-            )
-
-        # ---------------------------------------------------------
-        # 2. Check recovery attempt limit
-        # ---------------------------------------------------------
-
-        existing_attempts = self._attempt_count(
-            payment.id
-        )
-
-        if existing_attempts >= self.MAX_RECOVERY_ATTEMPTS:
-            return self._create_max_attempts_blocked_result(
-                payment=payment,
-            )
-
-        # ---------------------------------------------------------
-        # 3. Ask agent for decision and guardrail result
-        # ---------------------------------------------------------
-
-        (
-            decision,
-            guardrail_result,
-        ) = self.agent.evaluate_with_guardrails(
+        attempt, decision, guardrail = self.evaluate_and_record(
             payment
         )
 
-        # ---------------------------------------------------------
-        # 4. Persist recovery attempt as pending
-        # ---------------------------------------------------------
+        # No recovery attempt was needed.
+        if attempt is None:
+            execution = self._execution_result(
+                action="no_action",
+                status="no_action",
+                reason=decision.reason,
+            )
 
-        attempt = RecoveryAttempt(
-            payment_id=payment.id,
-            action=decision.action,
-            attempt_number=self._next_attempt_number(
-                payment.id
-            ),
-            status="pending",
-        )
+            return (
+                None,
+                decision,
+                guardrail,
+                execution,
+            )
 
-        self.db.add(attempt)
-        self.db.flush()
-        self.db.refresh(attempt)
-
-        # ---------------------------------------------------------
-        # 5. Stop if guardrails reject the action
-        # ---------------------------------------------------------
-
-        if not guardrail_result.allowed:
-            attempt.status = "blocked"
-            attempt.recovered = False
-            attempt.error_message = guardrail_result.reason
-            attempt.completed_at = datetime.now(UTC)
-
-            self.db.flush()
-            self.db.refresh(attempt)
-
-            execution_result = RecoveryExecutionResult(
-                executed=False,
+        # Guardrails blocked execution.
+        if not guardrail.allowed:
+            execution = self._execution_result(
                 action=decision.action,
                 status="blocked",
-                reference_id=None,
-                reason=guardrail_result.reason,
+                reason=guardrail.reason,
             )
 
             return (
                 attempt,
                 decision,
-                guardrail_result,
-                execution_result,
+                guardrail,
+                execution,
             )
 
-        # ---------------------------------------------------------
-        # 6. Mark attempt as executing
-        # ---------------------------------------------------------
+        # Delayed retries are scheduled rather than immediately executed.
+        if decision.action == "wait_and_retry":
+            attempt.status = "scheduled"
+            attempt.scheduled_for = (
+                self._now()
+                + timedelta(
+                    minutes=self.WAIT_RETRY_DELAY_MINUTES
+                )
+            )
 
-        attempt.status = "executing"
-        self.db.flush()
+            execution = self._execution_result(
+                action=decision.action,
+                status="scheduled",
+                reason=decision.reason,
+            )
 
-        # ---------------------------------------------------------
-        # 7. Execute approved recovery action
-        # ---------------------------------------------------------
+            self.db.flush()
+
+            return (
+                attempt,
+                decision,
+                guardrail,
+                execution,
+            )
+
+        # An executor is required for immediate execution.
+        if self.executor is None:
+            raise RuntimeError(
+                "RecoveryExecutor is required for recovery execution."
+            )
 
         try:
-            execution_result = self.executor.execute(
-                payment=payment,
-                decision=decision,
-                guardrail_result=guardrail_result,
+            execution = self.executor.execute(
+                payment,
+                decision,
+                guardrail,
             )
-
-            if execution_result.executed:
-                attempt.provider_reference_id = (
-                    execution_result.reference_id
-                )
-                attempt.error_message = None
-
-                # Creating a recovery order does NOT mean the
-                # original payment has been recovered.
-                if decision.action == "retry":
-                    attempt.status = "awaiting_payment"
-                    attempt.recovered = None
-                    attempt.completed_at = None
-
-                elif decision.action == "wait_and_retry":
-                    attempt.status = "scheduled"
-                    attempt.recovered = None
-                    attempt.completed_at = None
-
-                else:
-                    attempt.status = (
-                        execution_result.status
-                    )
-                    attempt.recovered = False
-
-            else:
-                attempt.status = execution_result.status
-                attempt.recovered = False
-
-                attempt.provider_reference_id = (
-                    execution_result.reference_id
-                )
-
-                attempt.error_message = (
-                    execution_result.reason
-                )
 
         except Exception as exc:
             attempt.status = "failed"
             attempt.recovered = False
-            attempt.provider_reference_id = None
             attempt.error_message = str(exc)
+            attempt.provider_reference_id = None
+            attempt.completed_at = self._now()
 
-            execution_result = RecoveryExecutionResult(
-                executed=False,
-                action=decision.action,
-                status="failed",
-                reference_id=None,
-                reason=str(exc),
-            )
+            self.db.flush()
 
-        # ---------------------------------------------------------
-        # 8. Mark completion only for terminal states
-        # ---------------------------------------------------------
+            raise
 
-        terminal_statuses = {
-            "blocked",
-            "failed",
-            "completed",
-        }
+        # Executor successfully initiated recovery.
+        if execution.executed:
+            attempt.status = execution.status
+            attempt.recovered = None
+            attempt.provider_reference_id = execution.reference_id
+            attempt.error_message = None
+            attempt.completed_at = None
 
-        if attempt.status in terminal_statuses:
-            attempt.completed_at = datetime.now(UTC)
+        # Executor returned a non-executed result.
+        else:
+            attempt.status = "failed"
+            attempt.recovered = False
+            attempt.provider_reference_id = execution.reference_id
+            attempt.error_message = execution.reason
+            attempt.completed_at = self._now()
 
         self.db.flush()
-        self.db.refresh(attempt)
 
         return (
             attempt,
             decision,
-            guardrail_result,
-            execution_result,
+            guardrail,
+            execution,
         )
-
-    def _create_already_recovered_result(
-        self,
-        payment: Payment,
-        successful_attempt: RecoveryAttempt,
-    ) -> tuple[
-        RecoveryAttempt,
-        RecoveryDecision,
-        GuardrailResult,
-        RecoveryExecutionResult,
-    ]:
-        """
-        Return a blocked result when this payment has already been
-        successfully recovered.
-
-        No new RecoveryAttempt is created because recovery has
-        already succeeded and creating additional attempts would
-        incorrectly inflate recovery metrics.
-        """
-
-        reason = (
-            "Payment has already been successfully recovered. "
-            "No further recovery action will be executed."
-        )
-
-        decision = RecoveryDecision(
-            action="no_action",
-            reason=reason,
-        )
-
-        guardrail_result = GuardrailResult(
-            allowed=False,
-            reason=reason,
-        )
-
-        execution_result = RecoveryExecutionResult(
-            executed=False,
-            action="no_action",
-            status="blocked",
-            reference_id=(
-                successful_attempt.provider_reference_id
-            ),
-            reason=reason,
-        )
-
-        return (
-            successful_attempt,
-            decision,
-            guardrail_result,
-            execution_result,
-        )
-
-    def _create_max_attempts_blocked_result(
-        self,
-        payment: Payment,
-    ) -> tuple[
-        RecoveryAttempt,
-        RecoveryDecision,
-        GuardrailResult,
-        RecoveryExecutionResult,
-    ]:
-        """
-        Return a blocked result when the maximum number of recovery
-        attempts has already been reached.
-
-        No new attempt is created. Otherwise repeated webhook
-        deliveries could create attempt #4, #5, #6, etc. despite
-        the configured maximum being 3.
-        """
-
-        reason = (
-            f"Maximum recovery attempts "
-            f"({self.MAX_RECOVERY_ATTEMPTS}) reached."
-        )
-
-        latest_attempt = self._latest_attempt(
-            payment.id
-        )
-
-        if latest_attempt is None:
-            raise RuntimeError(
-                "Unable to find latest recovery attempt."
-            )
-
-        decision = RecoveryDecision(
-            action="no_action",
-            reason=reason,
-        )
-
-        guardrail_result = GuardrailResult(
-            allowed=False,
-            reason=reason,
-        )
-
-        execution_result = RecoveryExecutionResult(
-            executed=False,
-            action="no_action",
-            status="blocked",
-            reference_id=None,
-            reason=reason,
-        )
-
-        return (
-            latest_attempt,
-            decision,
-            guardrail_result,
-            execution_result,
-        )
-
-    def _successful_recovery_attempt(
-        self,
-        payment_id: int,
-    ) -> RecoveryAttempt | None:
-        """
-        Return a successful recovery attempt if this payment has
-        already been recovered.
-        """
-
-        return (
-            self.db.query(RecoveryAttempt)
-            .filter(
-                RecoveryAttempt.payment_id == payment_id,
-                RecoveryAttempt.recovered.is_(True),
-            )
-            .order_by(
-                RecoveryAttempt.completed_at.desc()
-            )
-            .first()
-        )
-
-    def _attempt_count(
-        self,
-        payment_id: int,
-    ) -> int:
-        """
-        Return the total number of recovery attempts for a payment.
-        """
-
-        return (
-            self.db.query(RecoveryAttempt)
-            .filter(
-                RecoveryAttempt.payment_id == payment_id,
-            )
-            .count()
-        )
-
-    def _latest_attempt(
-        self,
-        payment_id: int,
-    ) -> RecoveryAttempt | None:
-        """
-        Return the latest recovery attempt for a payment.
-        """
-
-        return (
-            self.db.query(RecoveryAttempt)
-            .filter(
-                RecoveryAttempt.payment_id == payment_id,
-            )
-            .order_by(
-                RecoveryAttempt.attempt_number.desc()
-            )
-            .first()
-        )
-
-    def _next_attempt_number(
-        self,
-        payment_id: int,
-    ) -> int:
-        """
-        Return the next recovery attempt number for a payment.
-        """
-
-        latest_attempt = self._latest_attempt(
-            payment_id
-        )
-
-        if latest_attempt is None:
-            return 1
-
-        return latest_attempt.attempt_number + 1
-    

@@ -439,18 +439,22 @@ async def handle_payment_failed(
     )
 
     print(
-        "Recovery workflow completed:",
-        {
-            "payment_db_id": payment.id,
-            "attempt_id": recovery_attempt.id,
-            "action": recovery_decision.action,
-            "allowed": guardrail_result.allowed,
-            "execution_status": execution_result.status,
-            "provider_reference_id": (
-                execution_result.reference_id
-            ),
-        },
-    )
+    "Recovery workflow completed:",
+    {
+        "payment_db_id": payment.id,
+        "attempt_id": (
+            recovery_attempt.id
+            if recovery_attempt is not None
+            else None
+        ),
+        "action": recovery_decision.action,
+        "allowed": guardrail_result.allowed,
+        "execution_status": execution_result.status,
+        "provider_reference_id": (
+            execution_result.reference_id
+        ),
+    },
+)
 
     print(
         "Payment failed:",

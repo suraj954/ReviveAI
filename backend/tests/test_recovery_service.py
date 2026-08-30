@@ -25,7 +25,7 @@ class FakeQuery:
             return None
         return self.items[-1]
 
-    def count(self):
+    def scalar(self):
         return len(self.items)
 
 
@@ -50,6 +50,7 @@ class FakeSession:
     def refresh(self, obj):
         pass
 
+
 class FakeAgent:
     def __init__(
         self,
@@ -59,22 +60,11 @@ class FakeAgent:
         self.decision = decision
         self.guardrail = guardrail
 
-    def evaluate(self, payment):
-        return self.decision
-
     def evaluate_with_guardrails(self, payment):
         return self.decision, self.guardrail
 
 
 class FakeExecutor:
-    """
-    Test double for RecoveryExecutor.
-
-    The fake follows the same contract as the real executor:
-    it receives the complete Payment object rather than only
-    payment.id.
-    """
-
     def __init__(
         self,
         result: RecoveryExecutionResult | None = None,
@@ -118,23 +108,50 @@ def make_payment(
     )
 
     payment.id = payment_id
-
     return payment
+
+
+def make_agent(
+    action: str = "retry",
+    allowed: bool = True,
+) -> FakeAgent:
+    return FakeAgent(
+        RecoveryDecision(
+            action=action,
+            reason="Test recovery decision.",
+            recovery_probability=0.8,
+        ),
+        GuardrailResult(
+            allowed=allowed,
+            reason="Test guardrail result.",
+        ),
+    )
 
 
 def test_failed_payment_creates_retry_attempt() -> None:
     db = FakeSession()
-    service = RecoveryService(db)
 
-    attempt = service.evaluate_and_record(
+    service = RecoveryService(
+        db,
+        agent=make_agent(),
+    )
+
+    (
+        attempt,
+        decision,
+        guardrail,
+    ) = service.evaluate_and_record(
         make_payment("failed"),
     )
 
+    assert attempt is not None
     assert attempt.payment_id == 1
     assert attempt.action == "retry"
     assert attempt.attempt_number == 1
-    assert attempt.status == "pending"
+    assert attempt.status == "approved"
 
+    assert decision.action == "retry"
+    assert guardrail.allowed is True
     assert len(db.added) == 1
 
 
@@ -149,32 +166,99 @@ def test_second_attempt_increments_attempt_number() -> None:
 
     db.attempts.append(existing)
 
-    service = RecoveryService(db)
+    service = RecoveryService(
+        db,
+        agent=make_agent(),
+    )
 
-    attempt = service.evaluate_and_record(
+    (
+        attempt,
+        _,
+        _,
+    ) = service.evaluate_and_record(
         make_payment("failed"),
     )
 
+    assert attempt is not None
     assert attempt.attempt_number == 2
     assert attempt.action == "retry"
 
 
-def test_captured_payment_creates_no_action_attempt() -> None:
+def test_captured_payment_creates_no_attempt() -> None:
     db = FakeSession()
-    service = RecoveryService(db)
 
-    attempt = service.evaluate_and_record(
+    service = RecoveryService(
+        db,
+        agent=make_agent(),
+    )
+
+    (
+        attempt,
+        decision,
+        guardrail,
+    ) = service.evaluate_and_record(
         make_payment("captured"),
     )
 
-    assert attempt.payment_id == 1
-    assert attempt.action == "no_action"
-    assert attempt.attempt_number == 1
+    assert attempt is None
+    assert decision.action == "no_action"
+    assert guardrail.allowed is False
+    assert len(db.added) == 0
+
+
+def test_paid_payment_creates_no_attempt() -> None:
+    db = FakeSession()
+
+    service = RecoveryService(
+        db,
+        agent=make_agent(),
+    )
+
+    (
+        attempt,
+        decision,
+        guardrail,
+    ) = service.evaluate_and_record(
+        make_payment("paid"),
+    )
+
+    assert attempt is None
+    assert decision.action == "no_action"
+    assert guardrail.allowed is False
+
+
+def test_no_action_decision_creates_no_attempt() -> None:
+    db = FakeSession()
+
+    service = RecoveryService(
+        db,
+        agent=make_agent(
+            action="no_action",
+            allowed=False,
+        ),
+    )
+
+    (
+        attempt,
+        decision,
+        guardrail,
+    ) = service.evaluate_and_record(
+        make_payment("failed"),
+    )
+
+    assert attempt is None
+    assert decision.action == "no_action"
+    assert guardrail.allowed is False
+    assert len(db.added) == 0
 
 
 def test_execution_requires_executor() -> None:
     db = FakeSession()
-    service = RecoveryService(db)
+
+    service = RecoveryService(
+        db,
+        agent=make_agent(),
+    )
 
     with pytest.raises(
         RuntimeError,
@@ -185,14 +269,14 @@ def test_execution_requires_executor() -> None:
         )
 
 
-def test_successful_recovery_is_persisted() -> None:
+def test_successful_recovery_execution_is_persisted() -> None:
     db = FakeSession()
-
     payment = make_payment("failed")
 
     decision = RecoveryDecision(
         action="retry",
         reason="Payment failed.",
+        recovery_probability=0.9,
     )
 
     guardrail = GuardrailResult(
@@ -203,9 +287,12 @@ def test_successful_recovery_is_persisted() -> None:
     execution = RecoveryExecutionResult(
         executed=True,
         action="retry",
-        status="executed",
+        status="awaiting_payment",
         reference_id="retry_1",
-        reason="Recovery retry was executed successfully.",
+        reason=(
+            "Recovery checkout created successfully. "
+            "Awaiting verified payment completion."
+        ),
     )
 
     agent = FakeAgent(
@@ -228,10 +315,9 @@ def test_successful_recovery_is_persisted() -> None:
         returned_decision,
         returned_guardrail,
         returned_execution,
-    ) = service.evaluate_and_execute(
-        payment,
-    )
+    ) = service.evaluate_and_execute(payment)
 
+    assert attempt is not None
     assert returned_decision == decision
     assert returned_guardrail == guardrail
     assert returned_execution == execution
@@ -250,12 +336,12 @@ def test_successful_recovery_is_persisted() -> None:
 
 def test_blocked_recovery_is_not_executed() -> None:
     db = FakeSession()
-
     payment = make_payment("failed")
 
     decision = RecoveryDecision(
         action="retry",
         reason="Payment failed.",
+        recovery_probability=0.2,
     )
 
     guardrail = GuardrailResult(
@@ -263,16 +349,11 @@ def test_blocked_recovery_is_not_executed() -> None:
         reason="Recovery probability is below the execution threshold.",
     )
 
-    agent = FakeAgent(
-        decision,
-        guardrail,
-    )
-
     executor = FakeExecutor()
 
     service = RecoveryService(
         db,
-        agent=agent,
+        agent=FakeAgent(decision, guardrail),
         executor=executor,
     )
 
@@ -281,10 +362,9 @@ def test_blocked_recovery_is_not_executed() -> None:
         _,
         _,
         execution,
-    ) = service.evaluate_and_execute(
-        payment,
-    )
+    ) = service.evaluate_and_execute(payment)
 
+    assert attempt is not None
     assert attempt.status == "blocked"
     assert attempt.recovered is False
     assert attempt.error_message == guardrail.reason
@@ -293,29 +373,22 @@ def test_blocked_recovery_is_not_executed() -> None:
     assert execution.executed is False
     assert execution.status == "blocked"
     assert attempt.provider_reference_id is None
-
-    # Guardrails must prevent the executor from being called.
     assert executor.calls == []
 
 
-def test_failed_execution_is_persisted() -> None:
+def test_failed_execution_is_persisted_and_reraised() -> None:
     db = FakeSession()
-
     payment = make_payment("failed")
 
     decision = RecoveryDecision(
         action="retry",
         reason="Payment failed.",
+        recovery_probability=0.9,
     )
 
     guardrail = GuardrailResult(
         allowed=True,
         reason="Recovery action passed all guardrails.",
-    )
-
-    agent = FakeAgent(
-        decision,
-        guardrail,
     )
 
     executor = FakeExecutor(
@@ -324,27 +397,25 @@ def test_failed_execution_is_persisted() -> None:
 
     service = RecoveryService(
         db,
-        agent=agent,
+        agent=FakeAgent(decision, guardrail),
         executor=executor,
     )
 
-    (
-        attempt,
-        _,
-        _,
-        execution,
-    ) = service.evaluate_and_execute(
-        payment,
-    )
+    with pytest.raises(
+        RuntimeError,
+        match="Gateway unavailable",
+    ):
+        service.evaluate_and_execute(payment)
+
+    assert len(db.attempts) == 1
+
+    attempt = db.attempts[0]
 
     assert attempt.status == "failed"
     assert attempt.recovered is False
-    assert attempt.error_message == "Gateway unavailable"
+    assert "Gateway unavailable" in attempt.error_message
     assert attempt.provider_reference_id is None
     assert attempt.completed_at is not None
-
-    assert execution.executed is False
-    assert execution.status == "failed"
 
     assert executor.calls == [
         (payment, "retry", True),
@@ -353,12 +424,12 @@ def test_failed_execution_is_persisted() -> None:
 
 def test_executor_returning_blocked_result_is_persisted() -> None:
     db = FakeSession()
-
     payment = make_payment("failed")
 
     decision = RecoveryDecision(
         action="retry",
         reason="Payment failed.",
+        recovery_probability=0.9,
     )
 
     guardrail = GuardrailResult(
@@ -374,18 +445,13 @@ def test_executor_returning_blocked_result_is_persisted() -> None:
         reason="Gateway rejected the recovery request.",
     )
 
-    agent = FakeAgent(
-        decision,
-        guardrail,
-    )
-
     executor = FakeExecutor(
         result=execution,
     )
 
     service = RecoveryService(
         db,
-        agent=agent,
+        agent=FakeAgent(decision, guardrail),
         executor=executor,
     )
 
@@ -394,12 +460,11 @@ def test_executor_returning_blocked_result_is_persisted() -> None:
         _,
         _,
         returned_execution,
-    ) = service.evaluate_and_execute(
-        payment,
-    )
+    ) = service.evaluate_and_execute(payment)
 
+    assert attempt is not None
     assert returned_execution == execution
-    assert attempt.status == "blocked"
+    assert attempt.status == "failed"
     assert attempt.recovered is False
     assert attempt.error_message == execution.reason
     assert attempt.provider_reference_id is None
@@ -408,9 +473,9 @@ def test_executor_returning_blocked_result_is_persisted() -> None:
         (payment, "retry", True),
     ]
 
+
 def test_already_recovered_payment_is_not_retried() -> None:
     db = FakeSession()
-
     payment = make_payment("failed")
 
     existing = RecoveryAttempt(
@@ -427,6 +492,7 @@ def test_already_recovered_payment_is_not_retried() -> None:
 
     service = RecoveryService(
         db,
+        agent=make_agent(),
         executor=executor,
     )
 
@@ -437,17 +503,75 @@ def test_already_recovered_payment_is_not_retried() -> None:
         execution,
     ) = service.evaluate_and_execute(payment)
 
-    # Existing successful recovery is returned.
-    assert attempt is existing
-    assert attempt.status == "completed"
-    assert attempt.recovered is True
-
-    # No further recovery action is permitted.
+    assert attempt is None
     assert decision.action == "no_action"
     assert guardrail.allowed is False
-
     assert execution.executed is False
-    assert execution.status == "blocked"
-
-    # Most important: no external recovery operation is triggered.
+    assert execution.status == "no_action"
     assert executor.calls == []
+
+
+def test_maximum_recovery_attempts_stops_new_attempt() -> None:
+    db = FakeSession()
+    payment = make_payment("failed")
+
+    for number in range(1, 4):
+        db.attempts.append(
+            RecoveryAttempt(
+                payment_id=payment.id,
+                action="retry",
+                attempt_number=number,
+                status="failed",
+                recovered=False,
+            )
+        )
+
+    service = RecoveryService(
+        db,
+        agent=make_agent(),
+    )
+
+    (
+        attempt,
+        decision,
+        guardrail,
+    ) = service.evaluate_and_record(payment)
+
+    assert attempt is None
+    assert decision.action == "no_action"
+    assert guardrail.allowed is False
+    assert "Maximum recovery limit" in decision.reason
+
+
+def test_wait_and_retry_is_scheduled() -> None:
+    db = FakeSession()
+    payment = make_payment("failed")
+
+    decision = RecoveryDecision(
+        action="wait_and_retry",
+        reason="Temporary failure detected.",
+        recovery_probability=0.8,
+    )
+
+    guardrail = GuardrailResult(
+        allowed=True,
+        reason="Delayed retry approved.",
+    )
+
+    service = RecoveryService(
+        db,
+        agent=FakeAgent(decision, guardrail),
+    )
+
+    (
+        attempt,
+        _,
+        _,
+        execution,
+    ) = service.evaluate_and_execute(payment)
+
+    assert attempt is not None
+    assert attempt.status == "scheduled"
+    assert attempt.scheduled_for is not None
+    assert execution.executed is False
+    assert execution.status == "scheduled"

@@ -11,6 +11,7 @@ class PaymentStatus(str, Enum):
 class RecoveryStatus(str, Enum):
     PENDING = "pending"
     APPROVED = "approved"
+    SCHEDULED = "scheduled"
     EXECUTING = "executing"
     AWAITING_PAYMENT = "awaiting_payment"
 
@@ -22,7 +23,8 @@ class RecoveryStatus(str, Enum):
 
 
 class RecoveryAction(str, Enum):
-    RETRY_CHECKOUT = "retry_checkout"
+    RETRY = "retry"
+    WAIT_AND_RETRY = "wait_and_retry"
     NO_ACTION = "no_action"
 
 
