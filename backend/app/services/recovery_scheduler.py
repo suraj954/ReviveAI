@@ -7,12 +7,21 @@ from sqlalchemy.orm import Session
 
 from app.decisions.guardrails import GuardrailResult
 from app.decisions.policy import RecoveryDecision
-from app.models.enums import RecoveryAction, RecoveryStatus
+from app.models.enums import (
+    RecoveryAction,
+    RecoveryStatus,
+)
 from app.models.payment import Payment
 from app.models.recovery_attempt import RecoveryAttempt
-from app.razorpay.recovery_gateway import RazorpayRecoveryGateway
-from app.services.recovery_executor import RecoveryExecutor
-from app.services.recovery_service import RecoveryService
+from app.razorpay.recovery_gateway import (
+    RazorpayRecoveryGateway,
+)
+from app.services.recovery_executor import (
+    RecoveryExecutor,
+)
+from app.services.recovery_service import (
+    RecoveryService,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -20,18 +29,20 @@ logger = logging.getLogger(__name__)
 
 class RecoveryScheduler:
     """
-    Database-backed scheduler for delayed recovery interventions.
+    Database-backed scheduler for delayed recovery attempts.
 
-    The scheduler periodically finds recovery attempts that are:
+    Lifecycle:
 
-        - scheduled
-        - due for execution
+        scheduled
+            ->
+        executing
+            ->
+        awaiting_payment
+            ->
+        completed / failed
 
-    It then claims the attempt, executes the provider action, and
-    updates the recovery lifecycle.
-
-    A fresh database session must be supplied for every scheduler
-    polling cycle.
+    A fresh database session should be supplied for every polling
+    cycle.
     """
 
     def __init__(
@@ -42,11 +53,20 @@ class RecoveryScheduler:
     ) -> None:
         self.db = db
 
-        self.executor = executor or RecoveryExecutor(
-            RazorpayRecoveryGateway()
+        self.executor = (
+            executor
+            or RecoveryExecutor(
+                RazorpayRecoveryGateway()
+            )
         )
 
-        self.service = RecoveryService(db)
+        # Scheduler does not make new AI decisions.
+        # It only performs lifecycle transitions.
+        self.service = RecoveryService(
+            db=db,
+            agent=None,
+            executor=self.executor,
+        )
 
     def process_due_attempts(
         self,
@@ -54,14 +74,12 @@ class RecoveryScheduler:
         limit: int = 50,
     ) -> int:
         """
-        Process scheduled recovery attempts whose execution time
-        has arrived.
+        Process scheduled attempts whose execution time has arrived.
 
-        Returns:
-            Number of attempts successfully claimed for processing.
+        Returns the number of attempts successfully claimed.
 
-        Each attempt is committed independently so one provider
-        failure does not roll back unrelated scheduled attempts.
+        Each attempt is committed independently so one failure does
+        not roll back unrelated scheduled attempts.
         """
 
         if limit <= 0:
@@ -91,7 +109,9 @@ class RecoveryScheduler:
         for attempt in due_attempts:
             try:
                 self._process_attempt(attempt)
+
                 self.db.commit()
+
                 processed_count += 1
 
             except Exception:
@@ -118,12 +138,13 @@ class RecoveryScheduler:
         attempt: RecoveryAttempt,
     ) -> None:
         """
-        Process one due recovery attempt.
-
-        The attempt must be claimed before provider execution.
+        Process one scheduled recovery attempt.
         """
 
-        # Reload current state inside the active transaction.
+        # ---------------------------------------------------------
+        # Reload current state
+        # ---------------------------------------------------------
+
         current_attempt = (
             self.db.query(RecoveryAttempt)
             .filter(
@@ -137,17 +158,22 @@ class RecoveryScheduler:
                 "Scheduled recovery attempt no longer exists."
             )
 
-        # Another workflow may have cancelled or completed it.
+        # Another workflow may have already cancelled/completed it.
         if (
             current_attempt.status
             != RecoveryStatus.SCHEDULED.value
         ):
             return
 
+        # ---------------------------------------------------------
+        # Load original payment
+        # ---------------------------------------------------------
+
         payment = (
             self.db.query(Payment)
             .filter(
-                Payment.id == current_attempt.payment_id
+                Payment.id
+                == current_attempt.payment_id
             )
             .first()
         )
@@ -158,35 +184,41 @@ class RecoveryScheduler:
             )
 
         # ---------------------------------------------------------
-        # Re-check stopping conditions immediately before execution.
-        # Payment state may have changed while waiting.
+        # Re-check payment state
         # ---------------------------------------------------------
-        if payment.status in {"paid", "captured"}:
-            current_attempt.status = (
-                RecoveryStatus.CANCELLED.value
+
+        if payment.status in {
+            "paid",
+            "captured",
+            "success",
+            "succeeded",
+        }:
+            self.service.mark_cancelled(
+                current_attempt,
+                reason=(
+                    "Scheduled recovery cancelled because the "
+                    "original payment is already successful."
+                ),
             )
-            current_attempt.recovered = False
-            current_attempt.error_message = (
-                "Scheduled recovery cancelled because the "
-                "original payment is already successful."
-            )
-            current_attempt.completed_at = datetime.now(UTC)
-            self.db.flush()
+
             return
 
         # ---------------------------------------------------------
-        # Claim attempt: scheduled -> executing
+        # Claim attempt
         # ---------------------------------------------------------
+
         self.service.claim_scheduled_attempt(
             current_attempt
         )
 
         # ---------------------------------------------------------
-        # Execute the delayed recovery checkout.
+        # Execute delayed retry
         #
-        # We intentionally execute a RETRY action here because
-        # WAIT_AND_RETRY means "wait first, then retry".
+        # WAIT_AND_RETRY means:
+        #
+        # failed -> scheduled -> wait -> retry
         # ---------------------------------------------------------
+
         execution_decision = RecoveryDecision(
             action=RecoveryAction.RETRY.value,
             reason=(
@@ -201,8 +233,8 @@ class RecoveryScheduler:
         guardrail_result = GuardrailResult(
             allowed=True,
             reason=(
-                "Recovery action was previously approved and "
-                "scheduled."
+                "Recovery action was previously approved "
+                "before scheduling."
             ),
         )
 
@@ -211,6 +243,10 @@ class RecoveryScheduler:
             decision=execution_decision,
             guardrail_result=guardrail_result,
         )
+
+        # ---------------------------------------------------------
+        # Provider checkout created
+        # ---------------------------------------------------------
 
         if result.executed:
             if not result.reference_id:
@@ -221,10 +257,16 @@ class RecoveryScheduler:
 
             self.service.mark_awaiting_payment(
                 current_attempt,
-                provider_reference_id=result.reference_id,
+                provider_reference_id=(
+                    result.reference_id
+                ),
             )
 
             return
+
+        # ---------------------------------------------------------
+        # Execution failure
+        # ---------------------------------------------------------
 
         self.service.mark_execution_failed(
             current_attempt,
@@ -238,11 +280,8 @@ class RecoveryScheduler:
         reason: str,
     ) -> None:
         """
-        Persist a failure after the main processing transaction
-        has been rolled back.
-
-        This gives the scheduler a durable failure state instead
-        of silently retrying a permanently broken attempt forever.
+        Persist a durable failure state after the main processing
+        transaction has been rolled back.
         """
 
         try:
@@ -257,13 +296,13 @@ class RecoveryScheduler:
             if attempt is None:
                 return
 
-            # Do not overwrite a concurrent terminal transition.
-            if (
-                attempt.status
-                != RecoveryStatus.SCHEDULED.value
-                and attempt.status
-                != RecoveryStatus.EXECUTING.value
-            ):
+            # Do not overwrite terminal states.
+            if attempt.status in {
+                RecoveryStatus.COMPLETED.value,
+                RecoveryStatus.CANCELLED.value,
+                RecoveryStatus.BLOCKED.value,
+                RecoveryStatus.FAILED.value,
+            }:
                 return
 
             self.service.mark_execution_failed(

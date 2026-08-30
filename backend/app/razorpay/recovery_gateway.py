@@ -12,8 +12,8 @@ class RazorpayRecoveryGateway:
     Creates a new Razorpay Order for payment recovery.
 
     Creating an order does NOT mean revenue has been recovered.
-    Recovery is confirmed only after a verified successful
-    payment webhook.
+    Recovery is confirmed only after a verified successful payment
+    webhook.
     """
 
     def create_recovery_checkout(
@@ -36,6 +36,10 @@ class RazorpayRecoveryGateway:
         Execute an immediate recovery retry.
 
         A new Razorpay order is created for a failed payment.
+
+        Payment amounts are stored internally in the smallest currency
+        unit (paise for INR), while the existing create_order gateway
+        contract accepts major currency units.
         """
 
         if payment.status != PaymentStatus.FAILED.value:
@@ -48,12 +52,12 @@ class RazorpayRecoveryGateway:
                 "Payment amount must be greater than zero"
             )
 
-        # Payment amount is stored internally in paise.
-        # The create_order helper expected by this recovery
-        # gateway accepts the amount in rupees.
+        # Convert paise -> rupees.
         amount_in_rupees = payment.amount / 100
 
-        receipt = f"recovery_order_{payment.id}"
+        receipt = (
+            f"recovery_order_{payment.id}"
+        )
 
         order = create_order(
             amount_in_rupees=amount_in_rupees,
@@ -76,8 +80,14 @@ class RazorpayRecoveryGateway:
         """
         Return a scheduling reference for delayed recovery.
 
-        No Razorpay order is created yet. Actual provider execution
-        happens when the scheduler claims the attempt.
+        No Razorpay order is created at this stage.
+
+        The actual retry is executed later by RecoveryScheduler.
+
+        The scheduling action is allowed only while the payment is in
+        the initial created state. Once a payment has already failed,
+        the recovery engine should use the normal failed-payment
+        workflow.
         """
 
         if payment.status != PaymentStatus.CREATED.value:
@@ -85,4 +95,6 @@ class RazorpayRecoveryGateway:
                 "Wait-and-retry is only allowed for created payments"
             )
 
-        return f"scheduled_recovery_order_{payment.id}"
+        return (
+            f"scheduled_recovery_order_{payment.id}"
+        )

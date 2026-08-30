@@ -35,7 +35,7 @@ class RecoveryGateway(Protocol):
         """
         Schedule a delayed recovery retry.
 
-        Returns the scheduling reference ID.
+        Returns a scheduling reference ID.
         """
         ...
 
@@ -44,6 +44,10 @@ class RecoveryGateway(Protocol):
 class RecoveryExecutionResult:
     """
     Result of attempting to execute a recovery intervention.
+
+    Note:
+    `executed=True` means the provider-side recovery action was
+    successfully initiated. It does NOT mean revenue was recovered.
     """
 
     executed: bool
@@ -63,7 +67,7 @@ class RecoveryExecutor:
     - declare revenue recovered
 
     Revenue recovery is confirmed only by a verified provider
-    payment success event.
+    payment success webhook.
     """
 
     def __init__(
@@ -82,8 +86,10 @@ class RecoveryExecutor:
         Execute an approved recovery decision.
         """
 
-        # Safety boundary: execution is impossible without explicit
-        # guardrail approval.
+        # ---------------------------------------------------------
+        # SAFETY BOUNDARY
+        # ---------------------------------------------------------
+
         if not guardrail_result.allowed:
             return RecoveryExecutionResult(
                 executed=False,
@@ -93,9 +99,14 @@ class RecoveryExecutor:
                 reason=guardrail_result.reason,
             )
 
-        # Immediate retry.
+        # ---------------------------------------------------------
+        # IMMEDIATE RETRY
+        # ---------------------------------------------------------
+
         if decision.action == RecoveryAction.RETRY.value:
-            reference_id = self.gateway.execute_retry(payment)
+            reference_id = self.gateway.execute_retry(
+                payment
+            )
 
             return RecoveryExecutionResult(
                 executed=True,
@@ -103,17 +114,22 @@ class RecoveryExecutor:
                 status="executed",
                 reference_id=reference_id,
                 reason=(
-                    "Recovery retry was executed successfully."
+                    "Recovery retry was initiated successfully."
                 ),
             )
 
-        # Delayed retry scheduling.
+        # ---------------------------------------------------------
+        # DELAYED RETRY
+        # ---------------------------------------------------------
+
         if (
             decision.action
             == RecoveryAction.WAIT_AND_RETRY.value
         ):
             reference_id = (
-                self.gateway.execute_wait_and_retry(payment)
+                self.gateway.execute_wait_and_retry(
+                    payment
+                )
             )
 
             return RecoveryExecutionResult(
@@ -126,7 +142,10 @@ class RecoveryExecutor:
                 ),
             )
 
-        # Explicit no-action / unsupported action.
+        # ---------------------------------------------------------
+        # NO ACTION / UNSUPPORTED ACTION
+        # ---------------------------------------------------------
+
         return RecoveryExecutionResult(
             executed=False,
             action=decision.action,
