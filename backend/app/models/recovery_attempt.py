@@ -29,6 +29,9 @@ class RecoveryAttempt(Base):
 
     Recovery is considered successful only after a verified provider
     payment success event marks the attempt as completed/recovered.
+
+    The `events` relationship contains an append-only audit history
+    of important lifecycle transitions.
     """
 
     __tablename__ = "recovery_attempts"
@@ -57,6 +60,17 @@ class RecoveryAttempt(Base):
     payment: Mapped["Payment"] = relationship(
         "Payment",
         back_populates="recovery_attempts",
+    )
+
+    # ============================================================
+    # AUDIT EVENT RELATIONSHIP
+    # ============================================================
+
+    events: Mapped[list["RecoveryEvent"]] = relationship(
+        "RecoveryEvent",
+        back_populates="recovery_attempt",
+        cascade="all, delete-orphan",
+        order_by="RecoveryEvent.created_at",
     )
 
     # ============================================================

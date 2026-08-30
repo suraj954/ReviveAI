@@ -28,6 +28,25 @@ class RecoveryAction(str, Enum):
     NO_ACTION = "no_action"
 
 
+class RecoveryEventType(str, Enum):
+    """
+    Immutable audit events emitted throughout the recovery lifecycle.
+    """
+
+    ATTEMPT_CREATED = "attempt_created"
+    DECISION_MADE = "decision_made"
+    GUARDRAIL_APPROVED = "guardrail_approved"
+    GUARDRAIL_BLOCKED = "guardrail_blocked"
+
+    SCHEDULED = "scheduled"
+    EXECUTION_STARTED = "execution_started"
+    AWAITING_PAYMENT = "awaiting_payment"
+
+    RECOVERED = "recovered"
+    CANCELLED = "cancelled"
+    EXECUTION_FAILED = "execution_failed"
+
+
 class WebhookStatus(str, Enum):
     RECEIVED = "received"
     PROCESSED = "processed"

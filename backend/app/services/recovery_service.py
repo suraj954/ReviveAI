@@ -7,10 +7,12 @@ from app.decisions.guardrails import GuardrailResult
 from app.decisions.policy import RecoveryDecision
 from app.models.enums import (
     RecoveryAction,
+    RecoveryEventType,
     RecoveryStatus,
 )
 from app.models.payment import Payment
 from app.models.recovery_attempt import RecoveryAttempt
+from app.services.recovery_audit_service import RecoveryAuditService
 from app.services.recovery_executor import (
     RecoveryExecutionResult,
     RecoveryExecutor,
@@ -29,7 +31,8 @@ class RecoveryService:
     4. Persist recovery attempts.
     5. Execute immediate recovery actions.
     6. Schedule delayed recovery actions.
-    7. Provide lifecycle transition helpers for the scheduler.
+    7. Record immutable audit events.
+    8. Provide lifecycle transition helpers for the scheduler.
 
     This service does NOT declare revenue recovered.
 
@@ -49,6 +52,7 @@ class RecoveryService:
         self.db = db
         self.agent = agent
         self.executor = executor
+        self.audit = RecoveryAuditService(db)
 
     # ============================================================
     # TIME
@@ -57,6 +61,60 @@ class RecoveryService:
     @staticmethod
     def _now() -> datetime:
         return datetime.now(timezone.utc)
+
+    # ============================================================
+    # AUDIT HELPERS
+    # ============================================================
+
+    def _record_event(
+        self,
+        attempt: RecoveryAttempt,
+        *,
+        event_type: str,
+        description: str,
+        metadata: dict | None = None,
+    ) -> None:
+        """
+        Record an audit event when the attempt has a persisted ID.
+
+        The ID check keeps lightweight unit-test FakeSession objects
+        compatible while production SQLAlchemy sessions persist the
+        complete audit trail.
+        """
+
+        if getattr(attempt, "id", None) is None:
+            return
+
+        self.audit.record(
+            attempt,
+            event_type=event_type,
+            description=description,
+            metadata=metadata,
+        )
+
+    def _record_transition(
+        self,
+        attempt: RecoveryAttempt,
+        *,
+        from_status: str | None,
+        to_status: str,
+        description: str,
+        metadata: dict | None = None,
+    ) -> None:
+        """
+        Record a standardized lifecycle transition audit event.
+        """
+
+        if getattr(attempt, "id", None) is None:
+            return
+
+        self.audit.record_transition(
+            attempt,
+            from_status=from_status,
+            to_status=to_status,
+            description=description,
+            metadata=metadata,
+        )
 
     # ============================================================
     # RESULT HELPERS
@@ -216,9 +274,6 @@ class RecoveryService:
         Atomically transition:
 
             scheduled -> executing
-
-        This is called immediately before the scheduler performs
-        provider-side execution.
         """
 
         if (
@@ -229,6 +284,8 @@ class RecoveryService:
                 "Only scheduled recovery attempts can be claimed."
             )
 
+        previous_status = attempt.status
+
         attempt.status = (
             RecoveryStatus.EXECUTING.value
         )
@@ -236,6 +293,28 @@ class RecoveryService:
         attempt.updated_at = self._now()
 
         self.db.flush()
+
+        self._record_transition(
+            attempt,
+            from_status=previous_status,
+            to_status=RecoveryStatus.EXECUTING.value,
+            description=(
+                "Scheduled recovery attempt was claimed for "
+                "provider execution."
+            ),
+        )
+
+        self._record_event(
+            attempt,
+            event_type=RecoveryEventType.EXECUTION_STARTED.value,
+            description=(
+                "Recovery provider execution started."
+            ),
+            metadata={
+                "action": attempt.action,
+                "attempt_number": attempt.attempt_number,
+            },
+        )
 
     def mark_awaiting_payment(
         self,
@@ -247,15 +326,14 @@ class RecoveryService:
         Transition:
 
             executing -> awaiting_payment
-
-        The provider recovery checkout/order has been created,
-        but payment success has not yet been confirmed.
         """
 
         if not provider_reference_id:
             raise ValueError(
                 "Provider reference ID is required."
             )
+
+        previous_status = attempt.status
 
         attempt.status = (
             RecoveryStatus.AWAITING_PAYMENT.value
@@ -271,6 +349,31 @@ class RecoveryService:
 
         self.db.flush()
 
+        self._record_transition(
+            attempt,
+            from_status=previous_status,
+            to_status=RecoveryStatus.AWAITING_PAYMENT.value,
+            description=(
+                "Recovery checkout was created and is awaiting "
+                "verified payment confirmation."
+            ),
+            metadata={
+                "provider_reference_id": provider_reference_id,
+            },
+        )
+
+        self._record_event(
+            attempt,
+            event_type=RecoveryEventType.AWAITING_PAYMENT.value,
+            description=(
+                "Recovery provider order was created and payment "
+                "confirmation is pending."
+            ),
+            metadata={
+                "provider_reference_id": provider_reference_id,
+            },
+        )
+
     def mark_execution_failed(
         self,
         attempt: RecoveryAttempt,
@@ -281,6 +384,8 @@ class RecoveryService:
         Transition an active recovery attempt to failed.
         """
 
+        previous_status = attempt.status
+
         attempt.status = (
             RecoveryStatus.FAILED.value
         )
@@ -290,6 +395,24 @@ class RecoveryService:
         attempt.completed_at = self._now()
 
         self.db.flush()
+
+        self._record_transition(
+            attempt,
+            from_status=previous_status,
+            to_status=RecoveryStatus.FAILED.value,
+            description=(
+                "Recovery execution failed."
+            ),
+            metadata={
+                "reason": reason,
+            },
+        )
+
+        self._record_event(
+            attempt,
+            event_type=RecoveryEventType.EXECUTION_FAILED.value,
+            description=reason,
+        )
 
     def mark_completed(
         self,
@@ -304,6 +427,8 @@ class RecoveryService:
         This method should only be called after a verified provider
         success event.
         """
+
+        previous_status = attempt.status
 
         attempt.status = (
             RecoveryStatus.COMPLETED.value
@@ -321,6 +446,32 @@ class RecoveryService:
 
         self.db.flush()
 
+        self._record_transition(
+            attempt,
+            from_status=previous_status,
+            to_status=RecoveryStatus.COMPLETED.value,
+            description=(
+                "Recovery payment was successfully confirmed."
+            ),
+            metadata={
+                "recovery_payment_id": recovery_payment_id,
+                "recovered_amount": recovered_amount,
+            },
+        )
+
+        self._record_event(
+            attempt,
+            event_type=RecoveryEventType.RECOVERED.value,
+            description=(
+                "Recovery was confirmed by a verified provider "
+                "payment success event."
+            ),
+            metadata={
+                "recovery_payment_id": recovery_payment_id,
+                "recovered_amount": recovered_amount,
+            },
+        )
+
     def mark_cancelled(
         self,
         attempt: RecoveryAttempt,
@@ -331,6 +482,8 @@ class RecoveryService:
         Cancel an active recovery attempt.
         """
 
+        previous_status = attempt.status
+
         attempt.status = (
             RecoveryStatus.CANCELLED.value
         )
@@ -339,6 +492,24 @@ class RecoveryService:
         attempt.completed_at = self._now()
 
         self.db.flush()
+
+        self._record_transition(
+            attempt,
+            from_status=previous_status,
+            to_status=RecoveryStatus.CANCELLED.value,
+            description=(
+                "Recovery attempt was cancelled."
+            ),
+            metadata={
+                "reason": reason,
+            },
+        )
+
+        self._record_event(
+            attempt,
+            event_type=RecoveryEventType.CANCELLED.value,
+            description=reason,
+        )
 
     # ============================================================
     # DECISION + RECORDING
@@ -357,7 +528,6 @@ class RecoveryService:
         an executable recovery action is selected.
         """
 
-        # Stop already successful payments.
         if self._is_terminal_payment(payment):
             decision, guardrail = (
                 self._no_action_result(
@@ -365,13 +535,8 @@ class RecoveryService:
                 )
             )
 
-            return (
-                None,
-                decision,
-                guardrail,
-            )
+            return None, decision, guardrail
 
-        # Stop already recovered payments.
         if self._already_recovered(payment.id):
             decision, guardrail = (
                 self._no_action_result(
@@ -379,13 +544,8 @@ class RecoveryService:
                 )
             )
 
-            return (
-                None,
-                decision,
-                guardrail,
-            )
+            return None, decision, guardrail
 
-        # Stop after maximum attempts.
         if (
             self._attempt_count(payment.id)
             >= self.MAX_RECOVERY_ATTEMPTS
@@ -396,37 +556,25 @@ class RecoveryService:
                 )
             )
 
-            return (
-                None,
-                decision,
-                guardrail,
-            )
+            return None, decision, guardrail
 
-        # Agent is required for new decisions.
         if self.agent is None:
             raise RuntimeError(
                 "Recovery agent is required for evaluation."
             )
 
-        # AI decision + guardrails.
         decision, guardrail = (
             self.agent.evaluate_with_guardrails(
                 payment
             )
         )
 
-        # Explicit no-action decisions do not create attempts.
         if (
             decision.action
             == RecoveryAction.NO_ACTION.value
         ):
-            return (
-                None,
-                decision,
-                guardrail,
-            )
+            return None, decision, guardrail
 
-        # Create durable recovery attempt.
         attempt = RecoveryAttempt(
             payment_id=payment.id,
             action=decision.action,
@@ -458,6 +606,73 @@ class RecoveryService:
 
         self.db.add(attempt)
         self.db.flush()
+
+        # --------------------------------------------------------
+        # AUDIT: Attempt created
+        # --------------------------------------------------------
+
+        self._record_event(
+            attempt,
+            event_type=RecoveryEventType.ATTEMPT_CREATED.value,
+            description=(
+                "Recovery attempt was created after payment "
+                "failure evaluation."
+            ),
+            metadata={
+                "action": decision.action,
+                "attempt_number": attempt.attempt_number,
+                "recovery_probability": (
+                    decision.recovery_probability
+                ),
+            },
+        )
+
+        # --------------------------------------------------------
+        # AUDIT: AI decision
+        # --------------------------------------------------------
+
+        self._record_event(
+            attempt,
+            event_type=RecoveryEventType.DECISION_MADE.value,
+            description=decision.reason,
+            metadata={
+                "action": decision.action,
+                "recovery_probability": (
+                    decision.recovery_probability
+                ),
+            },
+        )
+
+        # --------------------------------------------------------
+        # AUDIT: Guardrail result
+        # --------------------------------------------------------
+
+        if guardrail.allowed:
+            self._record_event(
+                attempt,
+                event_type=(
+                    RecoveryEventType
+                    .GUARDRAIL_APPROVED
+                    .value
+                ),
+                description=guardrail.reason,
+                metadata={
+                    "action": decision.action,
+                },
+            )
+        else:
+            self._record_event(
+                attempt,
+                event_type=(
+                    RecoveryEventType
+                    .GUARDRAIL_BLOCKED
+                    .value
+                ),
+                description=guardrail.reason,
+                metadata={
+                    "action": decision.action,
+                },
+            )
 
         return (
             attempt,
@@ -491,10 +706,6 @@ class RecoveryService:
             payment
         )
 
-        # --------------------------------------------------------
-        # No attempt needed
-        # --------------------------------------------------------
-
         if attempt is None:
             execution = self._execution_result(
                 action=RecoveryAction.NO_ACTION.value,
@@ -508,10 +719,6 @@ class RecoveryService:
                 guardrail,
                 execution,
             )
-
-        # --------------------------------------------------------
-        # Guardrail blocked
-        # --------------------------------------------------------
 
         if not guardrail.allowed:
             execution = self._execution_result(
@@ -535,14 +742,12 @@ class RecoveryService:
             decision.action
             == RecoveryAction.WAIT_AND_RETRY.value
         ):
+            previous_status = attempt.status
+
             attempt.status = (
                 RecoveryStatus.SCHEDULED.value
             )
-
-            # Scheduling is NOT provider execution.
-            # The scheduler will execute the retry later.
             attempt.executed = False
-
             attempt.scheduled_for = (
                 self._now()
                 + timedelta(
@@ -550,6 +755,37 @@ class RecoveryService:
                         self.WAIT_RETRY_DELAY_MINUTES
                     )
                 )
+            )
+
+            self.db.flush()
+
+            self._record_transition(
+                attempt,
+                from_status=previous_status,
+                to_status=RecoveryStatus.SCHEDULED.value,
+                description=(
+                    "Recovery retry was scheduled for delayed "
+                    "execution."
+                ),
+                metadata={
+                    "scheduled_for": (
+                        attempt.scheduled_for
+                    ),
+                },
+            )
+
+            self._record_event(
+                attempt,
+                event_type=RecoveryEventType.SCHEDULED.value,
+                description=(
+                    "Recovery retry was approved and scheduled "
+                    "for delayed execution."
+                ),
+                metadata={
+                    "scheduled_for": (
+                        attempt.scheduled_for
+                    ),
+                },
             )
 
             execution = self._execution_result(
@@ -562,8 +798,6 @@ class RecoveryService:
                 executed=False,
                 reference_id=None,
             )
-
-            self.db.flush()
 
             return (
                 attempt,
@@ -596,10 +830,6 @@ class RecoveryService:
             )
             raise
 
-        # --------------------------------------------------------
-        # Provider execution initiated successfully
-        # --------------------------------------------------------
-
         if execution.executed:
             if not execution.reference_id:
                 self.mark_execution_failed(
@@ -621,10 +851,6 @@ class RecoveryService:
                     execution.reference_id
                 ),
             )
-
-        # --------------------------------------------------------
-        # Provider execution did not start
-        # --------------------------------------------------------
 
         else:
             self.mark_execution_failed(
