@@ -497,6 +497,13 @@ async def handle_order_paid(
     )
 
     if recovery_attempt:
+        # payment.captured is the preferred event for completing
+        # recovery because it contains the provider payment ID.
+        #
+        # order.paid is kept as a fallback confirmation event.
+        # The lifecycle method is idempotent, so if payment.captured
+        # already completed the attempt, this does nothing.
+
         recovery_service = get_recovery_service(db)
 
         recovery_service.complete_from_provider_webhook(

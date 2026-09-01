@@ -1,8 +1,38 @@
+# Environment
 .env
+.env.*
+!.env.example
+
+# Python virtual environments
 .venv/
 **/.venv/
+
+# Python cache
 __pycache__/
 **/__pycache__/
 *.pyc
+
+# Test / tooling cache
 .pytest_cache/
 **/.pytest_cache/
+
+# Node
+node_modules/
+**/node_modules/
+
+# Build output
+dist/
+**/dist/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

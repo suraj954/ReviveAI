@@ -1,97 +1,18 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ReviveAI Test Checkout</title>
-</head>
-
-<body>
-
-    <h1>ReviveAI</h1>
-    <p>Razorpay Test Mode Checkout</p>
-
-    <button id="pay-button">Pay ₹500</button>
-
-    <pre id="result"></pre>
-
-    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
-
-    <script>
-        const payButton = document.getElementById("pay-button");
-        const result = document.getElementById("result");
-
-        payButton.addEventListener("click", async () => {
-            result.textContent = "Creating Razorpay order...";
-
-            try {
-                const response = await fetch(
-                    "http://127.0.0.1:8000/api/orders",
-                    {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json"
-                        },
-                        body: JSON.stringify({
-                            amount: 500,
-                            receipt: "revive_checkout_demo"
-                        })
-                    }
-                );
-
-                const data = await response.json();
-
-                if (!response.ok || !data.success) {
-                    throw new Error(
-                        data.detail || "Failed to create Razorpay order."
-                    );
-                }
-
-                const options = {
-                    key: "rzp_test_TUknQTfzxWjgTD",
-                    amount: data.amount,
-                    currency: data.currency,
-                    name: "ReviveAI",
-                    description: "ReviveAI Test Transaction",
-                    order_id: data.order_id,
-
-                    handler: function (response) {
-                        result.textContent =
-                            "Payment completed!\n\n" +
-                            "Payment ID: " +
-                            response.razorpay_payment_id +
-                            "\nOrder ID: " +
-                            response.razorpay_order_id +
-                            "\nSignature: " +
-                            response.razorpay_signature;
-                    },
-
-                    theme: {
-                        color: "#3399cc"
-                    }
-                };
-
-                const rzp = new Razorpay(options);
-
-                rzp.on("payment.failed", function (response) {
-                    result.textContent =
-                        "Payment failed!\n\n" +
-                        "Code: " +
-                        response.error.code +
-                        "\nDescription: " +
-                        response.error.description +
-                        "\nReason: " +
-                        response.error.reason;
-                });
-
-                rzp.open();
-
-            } catch (error) {
-                result.textContent =
-                    "Error: " + error.message;
-            }
-        });
-    </script>
-
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ReviveAI — Revenue Recovery Orchestration</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
 </html>

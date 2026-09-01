@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-
+from app.config import settings
 from app.db.session import get_db
 from app.models.payment import Payment
 from app.razorpay.orders import create_order
@@ -116,14 +116,14 @@ def create_new_order(
         db.refresh(payment)
 
         return {
-            "success": True,
-            "payment_id": payment.id,
-            "order_id": payment.razorpay_order_id,
-            "amount": payment.amount,
-            "currency": payment.currency,
-            "status": payment.status,
-        }
-
+        "success": True,
+        "payment_id": payment.id,
+        "order_id": payment.razorpay_order_id,
+        "amount": payment.amount,
+        "currency": payment.currency,
+        "status": payment.status,
+        "key_id": settings.razorpay_key_id,
+       }
     except ValueError as exc:
         db.rollback()
 

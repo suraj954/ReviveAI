@@ -38,8 +38,8 @@ class RazorpayRecoveryGateway:
         A new Razorpay order is created for a failed payment.
 
         Payment amounts are stored internally in the smallest currency
-        unit (paise for INR), while the existing create_order gateway
-        contract accepts major currency units.
+        unit (paise for INR), and the create_order gateway also expects
+        the amount in the smallest currency unit.
         """
 
         if payment.status != PaymentStatus.FAILED.value:
@@ -52,15 +52,13 @@ class RazorpayRecoveryGateway:
                 "Payment amount must be greater than zero"
             )
 
-        # Convert paise -> rupees.
-        amount_in_rupees = payment.amount / 100
-
         receipt = (
             f"recovery_order_{payment.id}"
         )
 
         order = create_order(
-            amount_in_rupees=amount_in_rupees,
+            amount_in_paise=int(payment.amount),
+            currency=payment.currency,
             receipt=receipt,
         )
 
