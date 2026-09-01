@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     razorpay_key_secret: str
     razorpay_webhook_secret: str
 
+    recovery_token_secret: str
+    recovery_token_ttl_seconds: int = 1800
+
     database_url: str | None = None
     llm_api_key: str | None = None
 
