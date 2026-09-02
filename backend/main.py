@@ -109,13 +109,17 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        #My Old frontend
-        "http://127.0.0.1:5500",
-        "http://localhost:5500",
+    # Old frontend
+    "http://127.0.0.1:5500",
+    "http://localhost:5500",
 
-        #My New frontend -- React + Vite
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
+    # ReviveAI dashboard
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+
+    # Customer demo storefront
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
     ],
     allow_credentials=True,
     allow_methods=["*"],

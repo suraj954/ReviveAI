@@ -36,3 +36,9 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local debug utilities
+backend/inspect_recovery_attempts.py
+
+# Legacy frontend
+frontend_old/
