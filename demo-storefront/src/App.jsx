@@ -19,7 +19,10 @@ function App() {
     useState(null);
 
   function handleBuy(product) {
+    // Reset previous payment/recovery state for a new purchase
     setSelectedProduct(product);
+    setPaymentResult(null);
+    setRecoveryCheckout(null);
     setCheckoutOpen(true);
   }
 
@@ -29,10 +32,35 @@ function App() {
 
   function handlePaymentComplete(result) {
     setPaymentResult(result);
+
+    // Clear any previous recovery checkout
+    if (result.success) {
+      setRecoveryCheckout(null);
+    }
   }
 
   function handleRecoveryAvailable(checkout) {
     setRecoveryCheckout(checkout);
+  }
+
+  function handleRecoveryPaymentSuccess(response) {
+    console.log(
+      "Recovery payment completed successfully:",
+      response
+    );
+
+    // Remove recovery checkout state
+    setRecoveryCheckout(null);
+
+    // IMPORTANT:
+    // Replace the original failed payment state with success.
+    // This automatically removes the recovery UI.
+    setPaymentResult((previousResult) => ({
+      success: true,
+      product: previousResult?.product,
+      payment: response,
+      recovered: true,
+    }));
   }
 
   function openRecoveryCheckout() {
@@ -58,12 +86,13 @@ function App() {
       order_id: recoveryCheckout.order_id,
 
       handler: function (response) {
-        console.log(
-          "Recovery payment completed:",
-          response
-        );
+        handleRecoveryPaymentSuccess(response);
+      },
 
-        setRecoveryCheckout(null);
+      modal: {
+        ondismiss: function () {
+          console.log("Recovery checkout dismissed.");
+        },
       },
 
       theme: {
@@ -72,6 +101,13 @@ function App() {
     };
 
     const razorpay = new window.Razorpay(options);
+
+    razorpay.on("payment.failed", function (response) {
+      console.error(
+        "Recovery payment failed:",
+        response.error
+      );
+    });
 
     razorpay.open();
   }
@@ -177,16 +213,22 @@ function App() {
                 </span>
 
                 <div>
-                  <p>PAYMENT SUCCESSFUL</p>
+                  <p>
+                    {paymentResult.recovered
+                      ? "PAYMENT RECOVERED"
+                      : "PAYMENT SUCCESSFUL"}
+                  </p>
 
                   <h2>
-                    Thank you for your purchase!
+                    {paymentResult.recovered
+                      ? "Payment successfully recovered!"
+                      : "Thank you for your purchase!"}
                   </h2>
 
                   <span>
-                    Your payment for{" "}
-                    {paymentResult.product.name} was
-                    completed successfully.
+                    {paymentResult.recovered
+                      ? `ReviveAI successfully recovered your payment for ${paymentResult.product?.name}.`
+                      : `Your payment for ${paymentResult.product?.name} was completed successfully.`}
                   </span>
                 </div>
               </div>
@@ -215,6 +257,7 @@ function App() {
 
         {/* ================================================= */}
         {/* REVIVEAI RECOVERY */}
+        {/* Only visible while original payment remains failed */}
         {/* ================================================= */}
 
         {paymentResult &&
@@ -263,7 +306,9 @@ function App() {
           <div className="steps-grid">
             <article>
               <span>01</span>
+
               <h3>Payment monitored</h3>
+
               <p>
                 ReviveAI detects payment failures through
                 verified provider events.
@@ -272,7 +317,9 @@ function App() {
 
             <article>
               <span>02</span>
+
               <h3>AI evaluates recovery</h3>
+
               <p>
                 Recovery probability, guardrails and policy
                 determine the safest next action.
@@ -281,7 +328,9 @@ function App() {
 
             <article>
               <span>03</span>
+
               <h3>Revenue gets another chance</h3>
+
               <p>
                 Approved recovery workflows reconnect the
                 customer with a safe payment path.
@@ -290,6 +339,10 @@ function App() {
           </div>
         </section>
       </main>
+
+      {/* ================================================= */}
+      {/* CHECKOUT MODAL */}
+      {/* ================================================= */}
 
       {checkoutOpen && (
         <CheckoutModal

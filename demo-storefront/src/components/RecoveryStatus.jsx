@@ -10,7 +10,16 @@ function RecoveryStatus({
 }) {
   const [status, setStatus] = useState("pending");
   const [error, setError] = useState("");
+
   const intervalRef = useRef(null);
+  const recoveryFoundRef = useRef(false);
+  const callbackRef = useRef(onRecoveryAvailable);
+  const requestInProgressRef = useRef(false);
+
+  // Always keep the latest callback without restarting polling.
+  useEffect(() => {
+    callbackRef.current = onRecoveryAvailable;
+  }, [onRecoveryAvailable]);
 
   useEffect(() => {
     if (!recoveryToken) {
@@ -19,50 +28,103 @@ function RecoveryStatus({
 
     let active = true;
 
+    // Reset only when a NEW recovery token/session starts.
+    recoveryFoundRef.current = false;
+    requestInProgressRef.current = false;
+
+    setStatus("pending");
+    setError("");
+
+    const stopPolling = () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+
     async function checkRecoveryStatus() {
+      // Never poll again after recovery has been found.
+      if (
+        recoveryFoundRef.current ||
+        requestInProgressRef.current
+      ) {
+        return;
+      }
+
+      requestInProgressRef.current = true;
+
       try {
         const data = await getRecoveryStatus(recoveryToken);
 
-        if (!active) {
+        if (
+          !active ||
+          recoveryFoundRef.current
+        ) {
           return;
         }
 
-        setStatus(data.status);
         setError("");
 
+        // ---------------------------------------------
+        // Recovery is available
+        // Lock this state permanently for this session.
+        // ---------------------------------------------
         if (data.status === "recovery_available") {
-          if (intervalRef.current) {
-            clearInterval(intervalRef.current);
+          recoveryFoundRef.current = true;
+
+          setStatus("recovery_available");
+
+          stopPolling();
+
+          if (callbackRef.current) {
+            callbackRef.current(data.checkout);
           }
 
-          onRecoveryAvailable(data.checkout);
+          return;
         }
 
+        // ---------------------------------------------
+        // Terminal states
+        // ---------------------------------------------
         if (
           data.status === "resolved" ||
           data.status === "unavailable"
         ) {
-          if (intervalRef.current) {
-            clearInterval(intervalRef.current);
-          }
+          setStatus(data.status);
+          stopPolling();
+          return;
         }
+
+        // ---------------------------------------------
+        // Normal pending state
+        // ---------------------------------------------
+        setStatus(data.status || "pending");
+
       } catch (err) {
         if (!active) {
           return;
         }
 
-        if (err.message.includes("expired")) {
+        if (
+          err.message &&
+          err.message.toLowerCase().includes("expired")
+        ) {
           setStatus("expired");
+          stopPolling();
         } else {
           setError(
             "Unable to check recovery status. Retrying..."
           );
         }
+      } finally {
+        requestInProgressRef.current = false;
       }
     }
 
+    // Check immediately.
     checkRecoveryStatus();
 
+    // Continue polling.
     intervalRef.current = setInterval(
       checkRecoveryStatus,
       POLLING_INTERVAL
@@ -70,12 +132,10 @@ function RecoveryStatus({
 
     return () => {
       active = false;
-
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
+      stopPolling();
+      requestInProgressRef.current = false;
     };
-  }, [recoveryToken, onRecoveryAvailable]);
+  }, [recoveryToken]);
 
   const content = {
     pending: {
