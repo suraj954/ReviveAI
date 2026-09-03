@@ -17,7 +17,6 @@ import Intelligence from './pages/Intelligence'
 
 import {
   getPaymentInsights,
-  createDemoOrder,
   ApiError,
 } from './services/api'
 
@@ -40,24 +39,6 @@ const PAGE_META = {
   },
 }
 
-function loadRazorpayScript() {
-  return new Promise((resolve) => {
-    if (window.Razorpay) {
-      resolve(true)
-      return
-    }
-
-    const script = document.createElement('script')
-
-    script.src = 'https://checkout.razorpay.com/v1/checkout.js'
-
-    script.onload = () => resolve(true)
-    script.onerror = () => resolve(false)
-
-    document.body.appendChild(script)
-  })
-}
-
 export default function App() {
   return (
     <BrowserRouter>
@@ -76,8 +57,6 @@ function AppShell() {
 
   const [backendOnline, setBackendOnline] = useState(null)
 
-  const [creatingPayment, setCreatingPayment] = useState(false)
-
   const [modalPaymentId, setModalPaymentId] = useState(null)
   const [modalData, setModalData] = useState(null)
   const [modalLoading, setModalLoading] = useState(false)
@@ -95,76 +74,6 @@ function AppShell() {
     setTimeout(() => {
       setRefreshing(false)
     }, 500)
-  }, [])
-
-  const handleCreateDemoPayment = useCallback(async () => {
-    setCreatingPayment(true)
-
-    try {
-      const scriptLoaded =
-        await loadRazorpayScript()
-
-      if (!scriptLoaded) {
-        throw new Error(
-          'Unable to load Razorpay Checkout.'
-        )
-      }
-
-      const order =
-        await createDemoOrder()
-
-      if (!order?.success) {
-        throw new Error(
-          'Unable to create demo payment order.'
-        )
-      }
-
-      const options = {
-        key: order.key_id,
-
-        amount: order.amount,
-
-        currency: order.currency,
-
-        name: 'ReviveAI',
-
-        description:
-          'Demo payment monitored by ReviveAI',
-
-        order_id: order.order_id,
-
-        theme: {
-          color: '#7c3aed',
-        },
-
-        modal: {
-          ondismiss: () => {
-            setCreatingPayment(false)
-          },
-        },
-      }
-
-      const razorpay =
-        new window.Razorpay(options)
-
-      razorpay.open()
-
-      setBackendOnline(true)
-
-    } catch (err) {
-      console.error(
-        'Demo payment creation failed:',
-        err
-      )
-
-      alert(
-        err?.message ||
-          'Unable to start demo payment.'
-      )
-
-    } finally {
-      setCreatingPayment(false)
-    }
   }, [])
 
   const openIntelligence =
@@ -235,12 +144,6 @@ function AppShell() {
           refreshing={refreshing}
           onMenuToggle={() =>
             setSidebarOpen((open) => !open)
-          }
-          onCreateDemoPayment={
-            handleCreateDemoPayment
-          }
-          creatingPayment={
-            creatingPayment
           }
         />
 

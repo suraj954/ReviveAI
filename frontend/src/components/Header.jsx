@@ -4,8 +4,6 @@ export default function Header({
   onRefresh,
   refreshing,
   onMenuToggle,
-  onCreateDemoPayment,
-  creatingPayment,
 }) {
   return (
     <header className="header">
@@ -35,14 +33,6 @@ export default function Header({
 
       <div className="header-actions">
         <button
-          className={`btn btn-primary${creatingPayment ? ' is-loading' : ''}`}
-          onClick={onCreateDemoPayment}
-          disabled={creatingPayment}
-        >
-          {creatingPayment ? 'Creating…' : 'Create Demo Payment'}
-        </button>
-
-        <button
           className={`btn${refreshing ? ' is-loading' : ''}`}
           onClick={onRefresh}
           disabled={refreshing}
@@ -59,7 +49,7 @@ export default function Header({
             <path d="M21 3v6h-6" />
           </svg>
 
-          {refreshing ? 'Refreshing…' : 'Refresh'}
+          {refreshing ? 'Refreshing...' : 'Refresh'}
         </button>
       </div>
     </header>
