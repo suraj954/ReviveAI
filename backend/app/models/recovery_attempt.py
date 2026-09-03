@@ -25,14 +25,13 @@ class RecoveryAttempt(Base):
     """
     Durable record of a payment recovery decision and its lifecycle.
 
-    Important:
     Creating a RecoveryAttempt does NOT mean revenue was recovered.
 
-    Recovery is considered successful only after a verified provider
-    payment success event marks the attempt as completed/recovered.
+    Recovery is successful only after a verified provider payment
+    success event marks the attempt as completed.
 
-    The `events` relationship contains an append-only audit history
-    of important lifecycle transitions.
+    Failed attempts can be consumed once by the scheduler for a
+    bounded post-cooldown re-evaluation.
     """
 
     __tablename__ = "recovery_attempts"
@@ -137,7 +136,7 @@ class RecoveryAttempt(Base):
 
     # None  -> outcome unknown / awaiting payment
     # True  -> verified recovery succeeded
-    # False -> recovery failed / blocked / cancelled
+    # False -> recovery failed / blocked / cancelled / exhausted
     recovered: Mapped[bool | None] = mapped_column(
         Boolean,
         nullable=True,
@@ -198,6 +197,14 @@ class RecoveryAttempt(Base):
         nullable=True,
     )
 
+    # Marks that this failed attempt has already been consumed
+    # for one scheduler-driven post-cooldown re-evaluation.
+    retry_evaluated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -213,9 +220,9 @@ class RecoveryAttempt(Base):
         """
         Apply defaults immediately.
 
-        SQLAlchemy column defaults are normally applied during INSERT,
-        but tests and service-layer logic may inspect objects before
-        database persistence.
+        SQLAlchemy column defaults normally apply during INSERT,
+        but service logic and tests may inspect objects before
+        persistence.
         """
 
         kwargs.setdefault("attempt_number", 1)
@@ -223,20 +230,60 @@ class RecoveryAttempt(Base):
         kwargs.setdefault("executed", False)
         kwargs.setdefault("recovered", None)
 
-        kwargs.setdefault("recovery_probability", None)
-        kwargs.setdefault("decision_reason", None)
-        kwargs.setdefault("guardrail_reason", None)
+        kwargs.setdefault(
+            "recovery_probability",
+            None,
+        )
+        kwargs.setdefault(
+            "decision_reason",
+            None,
+        )
+        kwargs.setdefault(
+            "guardrail_reason",
+            None,
+        )
 
-        kwargs.setdefault("provider_reference_id", None)
-        kwargs.setdefault("recovery_payment_id", None)
-        kwargs.setdefault("recovered_amount", None)
-        kwargs.setdefault("error_message", None)
+        kwargs.setdefault(
+            "provider_reference_id",
+            None,
+        )
+        kwargs.setdefault(
+            "recovery_payment_id",
+            None,
+        )
+        kwargs.setdefault(
+            "recovered_amount",
+            None,
+        )
+        kwargs.setdefault(
+            "error_message",
+            None,
+        )
 
-        kwargs.setdefault("executed_at", None)
-        kwargs.setdefault("scheduled_for", None)
-        kwargs.setdefault("completed_at", None)
+        kwargs.setdefault(
+            "executed_at",
+            None,
+        )
+        kwargs.setdefault(
+            "scheduled_for",
+            None,
+        )
+        kwargs.setdefault(
+            "completed_at",
+            None,
+        )
+        kwargs.setdefault(
+            "retry_evaluated_at",
+            None,
+        )
 
-        kwargs.setdefault("created_at", utc_now())
-        kwargs.setdefault("updated_at", utc_now())
+        kwargs.setdefault(
+            "created_at",
+            utc_now(),
+        )
+        kwargs.setdefault(
+            "updated_at",
+            utc_now(),
+        )
 
         super().__init__(**kwargs)

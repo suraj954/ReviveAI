@@ -46,6 +46,9 @@ class RecoveryEventType(str, Enum):
     CANCELLED = "cancelled"
     EXECUTION_FAILED = "execution_failed"
 
+    RETRY_EVALUATED = "retry_evaluated"
+    EXHAUSTED = "exhausted"
+
 
 class WebhookStatus(str, Enum):
     RECEIVED = "received"

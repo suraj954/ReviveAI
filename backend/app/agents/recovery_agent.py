@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Protocol
+
 from app.decisions.guardrails import (
     GuardrailResult,
     apply_guardrails,
@@ -7,8 +11,22 @@ from app.decisions.policy import (
     decide_recovery,
 )
 from app.ml.features import build_payment_features
-from app.ml.recovery_model import RecoveryModel
 from app.models.payment import Payment
+
+
+class RecoveryPredictor(Protocol):
+    """
+    Minimal contract required by the recovery agent.
+
+    Any trained ML model used in production must implement
+    predict_probability(feature_vector).
+    """
+
+    def predict_probability(
+        self,
+        features: list[float],
+    ) -> float:
+        ...
 
 
 class RecoveryAgent:
@@ -21,16 +39,19 @@ class RecoveryAgent:
           ↓
         Feature extraction
           ↓
-        ML recovery probability (when trained model exists)
+        ML recovery probability
           ↓
         Explainable intervention policy
           ↓
         Guardrails
+
+    If no trained model is available, the system intentionally
+    falls back to deterministic policy logic.
     """
 
     def __init__(
         self,
-        model: RecoveryModel | None = None,
+        model: RecoveryPredictor | None = None,
     ) -> None:
         self.model = model
 
@@ -39,17 +60,15 @@ class RecoveryAgent:
         payment: Payment,
     ) -> float | None:
         """
-        Return ML recovery probability when a trained model is
-        available.
+        Return an ML-generated recovery probability when a trained
+        model is available.
 
-        Returns None when the system is operating in deterministic
-        fallback mode.
+        Returns None only when the model artifact is unavailable and
+        the system intentionally operates in deterministic fallback
+        mode.
         """
 
-        if (
-            self.model is None
-            or not self.model.is_trained
-        ):
+        if self.model is None:
             return None
 
         features = build_payment_features(payment)
@@ -65,9 +84,17 @@ class RecoveryAgent:
             features.payment_age_seconds,
         ]
 
-        prediction = self.model.predict(feature_vector)
+        probability = self.model.predict_probability(
+            feature_vector
+        )
 
-        return prediction.recovery_probability
+        # Defensive normalization for model implementations.
+        probability = float(probability)
+
+        return max(
+            0.0,
+            min(1.0, probability),
+        )
 
     def evaluate(
         self,
