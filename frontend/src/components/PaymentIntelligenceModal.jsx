@@ -197,9 +197,9 @@ function buildTimeline({ diagnosis, ai_decision, guardrails, recovery, attempts,
       detail: guardrails.reason || 'Guardrail validation completed.',
     })
   }
-  if (recovery?.latest_attempt_id) {
+  if (recovery?.latest_attempt_number ?? recovery?.latest_attempt_id) {
     events.push({
-      title: `Recovery attempt #${recovery.latest_attempt_id}`,
+      title: `Recovery attempt #${recovery.latest_attempt_number ?? recovery.latest_attempt_id}`,
       detail: `Status: ${recovery.latest_status || 'unknown'}${
         recovery.provider_reference_id ? ` · Ref ${recovery.provider_reference_id}` : ''
       }`,

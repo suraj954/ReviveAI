@@ -168,6 +168,33 @@ def get_recovery_status(
         )
 
     # ---------------------------------------------------------
+    # Resolve payment-level recovery success first
+    # ---------------------------------------------------------
+
+    successful_attempt = (
+        db.query(RecoveryAttempt)
+        .filter(
+            RecoveryAttempt.payment_id == payment.id,
+            (
+                RecoveryAttempt.status == "completed"
+            )
+            | (
+                RecoveryAttempt.recovered.is_(True)
+            ),
+        )
+        .order_by(
+            RecoveryAttempt.attempt_number.desc(),
+            RecoveryAttempt.id.desc(),
+        )
+        .first()
+    )
+
+    if successful_attempt is not None:
+        return {
+            "status": "resolved",
+        }
+
+    # ---------------------------------------------------------
     # Find latest recovery attempt
     # ---------------------------------------------------------
 

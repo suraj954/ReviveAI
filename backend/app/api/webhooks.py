@@ -417,8 +417,11 @@ async def handle_payment_failed(
             },
         )
 
-        # Critical: never recursively trigger recovery from
-        # a recovery payment webhook.
+        # Critical:
+        # Never recursively trigger recovery directly from a
+        # recovery-payment webhook.
+        #
+        # The scheduler / bounded workflow handles re-evaluation.
         return None
 
     # ---------------------------------------------------------
@@ -458,6 +461,31 @@ async def handle_payment_failed(
     payment.status = PaymentStatus.FAILED.value
     payment.razorpay_payment_id = razorpay_payment_id
 
+    # ---------------------------------------------------------
+    # PERSIST FAILURE CONTEXT
+    # ---------------------------------------------------------
+
+    failure_code = payment_data.get("error_code")
+    failure_reason = payment_data.get("error_reason")
+    failure_description = payment_data.get(
+        "error_description"
+    )
+
+    if failure_code:
+        payment.failure_code = str(
+            failure_code
+        )
+
+    if failure_reason:
+        payment.failure_reason = str(
+            failure_reason
+        )
+
+    if failure_description:
+        payment.failure_description = str(
+            failure_description
+        )
+
     print(
         "Original payment marked as failed:",
         {
@@ -481,8 +509,14 @@ async def handle_payment_captured(
     1. Original payment success.
     2. Recovery payment success.
 
-    Recovery is marked completed only after provider-confirmed
-    payment success.
+    Recovery completion is authoritative only after a
+    provider-confirmed payment.captured webhook.
+
+    Important:
+    Payment-level recovery cleanup belongs inside the recovery
+    service. The webhook handler must not independently cancel
+    attempts after completion because that can accidentally mutate
+    the just-completed attempt or create inconsistent state.
     """
 
     payment_data = (
@@ -571,12 +605,16 @@ async def handle_payment_captured(
     payment.status = PaymentStatus.CAPTURED.value
     payment.razorpay_payment_id = razorpay_payment_id
 
-    # Cancel any active recovery workflows because the original
-    # payment itself succeeded.
+    # If the original payment eventually succeeds, all active
+    # recovery workflows become unnecessary.
     recovery_service = get_recovery_service(db)
 
     recovery_service.cancel_active_attempts_for_payment(
         payment,
+        reason=(
+            "Original payment was successfully confirmed "
+            "by provider webhook."
+        ),
     )
 
 
@@ -625,6 +663,10 @@ async def handle_order_paid(
 
     recovery_service.cancel_active_attempts_for_payment(
         payment,
+        reason=(
+            "Original order was successfully confirmed "
+            "by provider webhook."
+        ),
     )
 
 

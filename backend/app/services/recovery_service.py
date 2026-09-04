@@ -104,9 +104,7 @@ class RecoveryService:
         description: str,
         metadata: dict | None = None,
     ) -> None:
-        """
-        Record a standardized lifecycle state transition.
-        """
+        """Record a standardized lifecycle state transition."""
 
         if getattr(attempt, "id", None) is None:
             return
@@ -130,9 +128,7 @@ class RecoveryService:
         RecoveryDecision,
         GuardrailResult,
     ]:
-        """
-        Build a standardized no-action decision.
-        """
+        """Build a standardized no-action decision."""
 
         decision = RecoveryDecision(
             action=RecoveryAction.NO_ACTION.value,
@@ -156,9 +152,7 @@ class RecoveryService:
         executed: bool = False,
         reference_id: str | None = None,
     ) -> RecoveryExecutionResult:
-        """
-        Build a standardized execution result.
-        """
+        """Build a standardized execution result."""
 
         return RecoveryExecutionResult(
             executed=executed,
@@ -228,19 +222,27 @@ class RecoveryService:
         self,
         payment_id: int,
     ) -> bool:
-        """
-        Check whether any previous recovery attempt succeeded.
-        """
+        """Check whether any previous recovery attempt succeeded."""
 
         attempts = self._get_attempts(payment_id)
 
         return any(
-            getattr(
-                attempt,
-                "recovered",
-                None,
+            (
+                getattr(
+                    attempt,
+                    "recovered",
+                    None,
+                )
+                is True
             )
-            is True
+            or (
+                getattr(
+                    attempt,
+                    "status",
+                    None,
+                )
+                == RecoveryStatus.COMPLETED.value
+            )
             for attempt in attempts
         )
 
@@ -248,9 +250,7 @@ class RecoveryService:
         self,
         payment_id: int,
     ) -> int:
-        """
-        Count all recovery attempts for a payment.
-        """
+        """Count all recovery attempts for a payment."""
 
         return len(
             self._get_attempts(payment_id)
@@ -260,9 +260,7 @@ class RecoveryService:
         self,
         payment_id: int,
     ) -> int:
-        """
-        Calculate the next sequential recovery attempt number.
-        """
+        """Calculate the next sequential recovery attempt number."""
 
         attempts = self._get_attempts(payment_id)
 
@@ -282,6 +280,22 @@ class RecoveryService:
                 for attempt in attempts
             )
             + 1
+        )
+
+    # ============================================================
+    # ACTIVE ATTEMPT HELPERS
+    # ============================================================
+
+    @staticmethod
+    def _active_statuses() -> tuple[str, ...]:
+        """Statuses representing an unfinished recovery workflow."""
+
+        return (
+            RecoveryStatus.PENDING.value,
+            RecoveryStatus.APPROVED.value,
+            RecoveryStatus.EXECUTING.value,
+            RecoveryStatus.AWAITING_PAYMENT.value,
+            RecoveryStatus.SCHEDULED.value,
         )
 
     # ============================================================
@@ -347,9 +361,9 @@ class RecoveryService:
         """
         Transition an executed recovery attempt to awaiting_payment.
 
-        This state means the provider-side recovery checkout/order
-        was successfully created, but payment success has not yet
-        been verified.
+        This means the provider-side recovery checkout/order was
+        successfully created, but payment success has not yet been
+        verified.
         """
 
         if not provider_reference_id:
@@ -402,9 +416,7 @@ class RecoveryService:
         *,
         reason: str,
     ) -> None:
-        """
-        Transition an active recovery attempt to failed.
-        """
+        """Transition an active recovery attempt to failed."""
 
         previous_status = attempt.status
 
@@ -490,9 +502,14 @@ class RecoveryService:
         *,
         reason: str,
     ) -> None:
-        """
-        Cancel an active recovery attempt.
-        """
+        """Cancel an active recovery attempt."""
+
+        # A completed recovery is terminal and must never be cancelled.
+        if (
+            attempt.status
+            == RecoveryStatus.COMPLETED.value
+        ):
+            return
 
         previous_status = attempt.status
 
@@ -520,32 +537,9 @@ class RecoveryService:
             description=reason,
         )
 
-    def complete_from_provider_webhook(
-        self,
-        attempt: RecoveryAttempt,
-        *,
-        recovery_payment_id: str | None,
-        recovered_amount: int | None,
-    ) -> None:
-        """
-        Complete a recovery attempt after a verified provider webhook.
-
-        Intentionally idempotent because payment providers may send
-        duplicate webhook events.
-        """
-
-        if (
-            attempt.status
-            == RecoveryStatus.COMPLETED.value
-            and attempt.recovered is True
-        ):
-            return
-
-        self.mark_completed(
-            attempt,
-            recovery_payment_id=recovery_payment_id,
-            recovered_amount=recovered_amount,
-        )
+    # ============================================================
+    # PAYMENT-LEVEL CANCELLATION
+    # ============================================================
 
     def cancel_active_attempts_for_payment(
         self,
@@ -555,24 +549,21 @@ class RecoveryService:
             "Original payment succeeded before recovery "
             "was completed."
         ),
+        exclude_attempt_id: int | None = None,
     ) -> int:
         """
         Cancel all active recovery attempts for a payment.
 
-        Called when a verified webhook confirms that the original
-        payment succeeded.
+        exclude_attempt_id is important when one recovery attempt has
+        just succeeded. The successful attempt must remain COMPLETED,
+        while only sibling active attempts are cancelled.
 
-        Every cancellation passes through mark_cancelled() so that
-        lifecycle state changes and audit events remain centralized.
+        The method intentionally operates only on active statuses.
+        Failed and completed attempts are historical records and must
+        remain untouched.
         """
 
-        active_statuses = (
-            RecoveryStatus.PENDING.value,
-            RecoveryStatus.APPROVED.value,
-            RecoveryStatus.EXECUTING.value,
-            RecoveryStatus.AWAITING_PAYMENT.value,
-            RecoveryStatus.SCHEDULED.value,
-        )
+        active_statuses = self._active_statuses()
 
         query = (
             self.db.query(RecoveryAttempt)
@@ -585,33 +576,122 @@ class RecoveryService:
         # Support lightweight test doubles.
         if hasattr(query, "items"):
             attempts = [
-                attempt
-                for attempt in query.items
+                candidate
+                for candidate in query.items
                 if (
                     getattr(
-                        attempt,
+                        candidate,
                         "payment_id",
                         None,
                     )
                     == payment.id
                     and getattr(
-                        attempt,
+                        candidate,
                         "status",
                         None,
                     )
                     in active_statuses
+                    and (
+                        exclude_attempt_id is None
+                        or getattr(
+                            candidate,
+                            "id",
+                            None,
+                        )
+                        != exclude_attempt_id
+                    )
                 )
             ]
         else:
             attempts = query.all()
 
-        for attempt in attempts:
+            if exclude_attempt_id is not None:
+                attempts = [
+                    candidate
+                    for candidate in attempts
+                    if candidate.id != exclude_attempt_id
+                ]
+
+        cancelled_count = 0
+
+        for candidate in attempts:
             self.mark_cancelled(
-                attempt,
+                candidate,
                 reason=reason,
             )
+            cancelled_count += 1
 
-        return len(attempts)
+        return cancelled_count
+
+    # ============================================================
+    # PROVIDER WEBHOOK COMPLETION
+    # ============================================================
+
+    def complete_from_provider_webhook(
+        self,
+        attempt: RecoveryAttempt,
+        *,
+        recovery_payment_id: str | None,
+        recovered_amount: int | None,
+    ) -> None:
+        """
+        Complete a recovery attempt after a verified provider webhook.
+
+        Idempotent because payment providers may send duplicate
+        payment.captured and order.paid events.
+
+        After one recovery attempt succeeds:
+
+        1. That exact attempt remains COMPLETED.
+        2. Every other active attempt for the same payment is cancelled.
+        3. No stale checkout should remain awaiting_payment.
+        """
+
+        # Duplicate webhook for an already completed attempt.
+        if (
+            attempt.status
+            == RecoveryStatus.COMPLETED.value
+            and getattr(
+                attempt,
+                "recovered",
+                None,
+            )
+            is True
+        ):
+            return
+
+        self.mark_completed(
+            attempt,
+            recovery_payment_id=recovery_payment_id,
+            recovered_amount=recovered_amount,
+        )
+
+        # Fake objects used by isolated unit tests may not expose the
+        # SQLAlchemy relationship. In production, payment is normally
+        # available through attempt.payment.
+        payment = getattr(
+            attempt,
+            "payment",
+            None,
+        )
+
+        if payment is None:
+            return
+
+        # Cancel only sibling active attempts.
+        # Never cancel the attempt that was just completed.
+        self.cancel_active_attempts_for_payment(
+            payment,
+            reason=(
+                "Another recovery attempt successfully recovered "
+                "the payment."
+            ),
+            exclude_attempt_id=getattr(
+                attempt,
+                "id",
+                None,
+            ),
+        )
 
     # ============================================================
     # DECISION + RECORDING

@@ -16,44 +16,22 @@ router = APIRouter(
 )
 
 
-# =============================================================
-# HELPERS
-# =============================================================
-
-
 def format_amount(amount: int | None) -> float:
-    """
-    Convert an amount stored in the smallest currency unit
-    (paise for INR) into major currency units.
-    """
-
+    """Convert smallest currency units into major currency units."""
     return round((amount or 0) / 100, 2)
 
 
 def serialize_datetime(value):
-    """
-    Safely serialize optional datetime values.
-    """
-
-    if value is None:
-        return None
-
-    return value.isoformat()
+    return value.isoformat() if value is not None else None
 
 
 def get_latest_attempt_for_payment(
     db: Session,
     payment_id: int,
 ) -> RecoveryAttempt | None:
-    """
-    Return the most recent recovery attempt for a payment.
-    """
-
     return (
         db.query(RecoveryAttempt)
-        .filter(
-            RecoveryAttempt.payment_id == payment_id
-        )
+        .filter(RecoveryAttempt.payment_id == payment_id)
         .order_by(
             RecoveryAttempt.attempt_number.desc(),
             RecoveryAttempt.id.desc(),
@@ -62,9 +40,27 @@ def get_latest_attempt_for_payment(
     )
 
 
-# =============================================================
-# DASHBOARD SUMMARY
-# =============================================================
+def is_successful_attempt(attempt: RecoveryAttempt) -> bool:
+    return (
+        attempt.status == RecoveryStatus.COMPLETED.value
+        or attempt.recovered is True
+    )
+
+
+def build_recovery_indexes(attempts: list[RecoveryAttempt]):
+    """Build payment-level recovery state without double counting."""
+    recovered_payment_ids = {
+        attempt.payment_id
+        for attempt in attempts
+        if is_successful_attempt(attempt)
+    }
+
+    successful_attempt_by_payment = {}
+    for attempt in attempts:
+        if is_successful_attempt(attempt):
+            successful_attempt_by_payment[attempt.payment_id] = attempt
+
+    return recovered_payment_ids, successful_attempt_by_payment
 
 
 @router.get("/summary")
@@ -72,42 +68,38 @@ def get_dashboard_summary(
     db: Session = Depends(get_db),
 ):
     """
-    Return high-level revenue recovery metrics.
+    Return payment-level revenue recovery metrics.
 
-    The dashboard reflects the actual ReviveAI recovery lifecycle:
-
-        Payment Failure
-                ↓
-        Revenue At Risk
-                ↓
-        AI Decision
-                ↓
-        Guardrail Approval
-                ↓
-        Recovery Attempt
-                ↓
-        scheduled / executing / awaiting_payment
-                ↓
-        Verified Webhook Confirmation
-                ↓
-        completed
+    Revenue at risk, recovered revenue, and active recovery value are
+    calculated per original payment, not per recovery attempt.
     """
-
-    # ---------------------------------------------------------
-    # PAYMENT METRICS
-    # ---------------------------------------------------------
 
     payments = db.query(Payment).all()
 
-    total_payments = len(payments)
+    attempts = (
+        db.query(RecoveryAttempt)
+        .order_by(
+            RecoveryAttempt.created_at.desc(),
+            RecoveryAttempt.id.desc(),
+        )
+        .all()
+    )
 
-    failed_payments = [
+    (
+        recovered_payment_ids,
+        successful_attempt_by_payment,
+    ) = build_recovery_indexes(attempts)
+
+    unresolved_failed_payments = [
         payment
         for payment in payments
-        if payment.status == "failed"
+        if (
+            payment.status == "failed"
+            and payment.id not in recovered_payment_ids
+        )
     ]
 
-    successful_payments = [
+    original_successful_payments = [
         payment
         for payment in payments
         if payment.status in {
@@ -117,48 +109,6 @@ def get_dashboard_summary(
             "succeeded",
         }
     ]
-
-    total_payment_amount = sum(
-        payment.amount or 0
-        for payment in payments
-    )
-
-    revenue_at_risk = sum(
-        payment.amount or 0
-        for payment in failed_payments
-    )
-
-    # ---------------------------------------------------------
-    # RECOVERY ATTEMPTS
-    # ---------------------------------------------------------
-
-    attempts = (
-        db.query(RecoveryAttempt)
-        .order_by(
-            RecoveryAttempt.created_at.desc()
-        )
-        .all()
-    )
-
-    total_recovery_attempts = len(attempts)
-
-    # ---------------------------------------------------------
-    # SUCCESSFUL RECOVERIES
-    # ---------------------------------------------------------
-
-    successful_attempts = [
-        attempt
-        for attempt in attempts
-        if (
-            attempt.status
-            == RecoveryStatus.COMPLETED.value
-            or attempt.recovered is True
-        )
-    ]
-
-    # ---------------------------------------------------------
-    # ACTIVE RECOVERIES
-    # ---------------------------------------------------------
 
     active_statuses = {
         RecoveryStatus.PENDING.value,
@@ -171,74 +121,31 @@ def get_dashboard_summary(
     active_attempts = [
         attempt
         for attempt in attempts
-        if attempt.status in active_statuses
+        if (
+            attempt.status in active_statuses
+            and attempt.payment_id not in recovered_payment_ids
+        )
     ]
 
-    # ---------------------------------------------------------
-    # INDIVIDUAL LIFECYCLE COUNTS
-    # ---------------------------------------------------------
+    successful_recovery_payment_ids = recovered_payment_ids
 
-    scheduled_attempts = [
-        attempt
-        for attempt in attempts
-        if attempt.status
-        == RecoveryStatus.SCHEDULED.value
-    ]
-
-    executing_attempts = [
-        attempt
-        for attempt in attempts
-        if attempt.status
-        == RecoveryStatus.EXECUTING.value
-    ]
-
-    awaiting_payment_attempts = [
-        attempt
-        for attempt in attempts
-        if attempt.status
-        == RecoveryStatus.AWAITING_PAYMENT.value
-    ]
-
-    failed_attempts = [
-        attempt
-        for attempt in attempts
-        if attempt.status
-        == RecoveryStatus.FAILED.value
-    ]
-
-    blocked_attempts = [
-        attempt
-        for attempt in attempts
-        if attempt.status
-        == RecoveryStatus.BLOCKED.value
-    ]
-
-    cancelled_attempts = [
-        attempt
-        for attempt in attempts
-        if attempt.status
-        == RecoveryStatus.CANCELLED.value
-    ]
-
-    exhausted_attempts = [
-        attempt
-        for attempt in attempts
-        if attempt.status
-        == RecoveryStatus.EXHAUSTED.value
-    ]
-
-    # ---------------------------------------------------------
-    # RECOVERED REVENUE
-    # ---------------------------------------------------------
-
-    revenue_recovered = sum(
-        attempt.recovered_amount or 0
-        for attempt in successful_attempts
+    revenue_at_risk = sum(
+        payment.amount or 0
+        for payment in unresolved_failed_payments
     )
 
-    # ---------------------------------------------------------
-    # ACTIVE RECOVERY VALUE
-    # ---------------------------------------------------------
+    # Count at most one recovered amount per original payment.
+    revenue_recovered = 0
+    for payment in payments:
+        attempt = successful_attempt_by_payment.get(payment.id)
+        if attempt is None:
+            continue
+
+        revenue_recovered += (
+            attempt.recovered_amount
+            if attempt.recovered_amount is not None
+            else payment.amount
+        )
 
     active_payment_ids = {
         attempt.payment_id
@@ -251,10 +158,6 @@ def get_dashboard_summary(
         if payment.id in active_payment_ids
     )
 
-    # ---------------------------------------------------------
-    # TOTAL REVENUE THAT ENTERED RECOVERY
-    # ---------------------------------------------------------
-
     recovery_payment_ids = {
         attempt.payment_id
         for attempt in attempts
@@ -266,127 +169,53 @@ def get_dashboard_summary(
         if payment.id in recovery_payment_ids
     )
 
-    # ---------------------------------------------------------
-    # RECOVERY RATE
-    # ---------------------------------------------------------
-
-    if total_amount_entered_recovery > 0:
-        recovery_rate = round(
-            (
-                revenue_recovered
-                / total_amount_entered_recovery
-            )
+    recovery_rate = (
+        round(
+            revenue_recovered
+            / total_amount_entered_recovery
             * 100,
             2,
         )
-    else:
-        recovery_rate = 0.0
-
-    # ---------------------------------------------------------
-    # WEBHOOK METRICS
-    # ---------------------------------------------------------
-
-    webhook_events = (
-        db.query(WebhookEvent)
-        .count()
+        if total_amount_entered_recovery > 0
+        else 0.0
     )
 
-    # ---------------------------------------------------------
-    # RETURN
-    # ---------------------------------------------------------
-
-    return {
-        # =====================================================
-        # PAYMENT OVERVIEW
-        # =====================================================
-
-        "total_payments": total_payments,
-
-        "failed_payments": len(
-            failed_payments
-        ),
-
-        "successful_payments": len(
-            successful_payments
-        ),
-
-        "total_payment_amount": format_amount(
-            total_payment_amount
-        ),
-
-        # =====================================================
-        # REVENUE RECOVERY
-        # =====================================================
-
-        "revenue_at_risk": format_amount(
-            revenue_at_risk
-        ),
-
-        "revenue_recovered": format_amount(
-            revenue_recovered
-        ),
-
-        "active_recovery_value": format_amount(
-            active_recovery_value
-        ),
-
-        "recovery_rate": recovery_rate,
-
-        # =====================================================
-        # RECOVERY PIPELINE
-        # =====================================================
-
-        "total_recovery_attempts": (
-            total_recovery_attempts
-        ),
-
-        "active_recoveries": len(
-            active_attempts
-        ),
-
-        "scheduled_recoveries": len(
-            scheduled_attempts
-        ),
-
-        "executing_recoveries": len(
-            executing_attempts
-        ),
-
-        "awaiting_payment_recoveries": len(
-            awaiting_payment_attempts
-        ),
-
-        "successful_recoveries": len(
-            successful_attempts
-        ),
-
-        "failed_recoveries": len(
-            failed_attempts
-        ),
-
-        "blocked_recoveries": len(
-            blocked_attempts
-        ),
-
-        "cancelled_recoveries": len(
-            cancelled_attempts
-        ),
-
-        "exhausted_recoveries": len(
-            exhausted_attempts
-        ),
-
-        # =====================================================
-        # SYSTEM OBSERVABILITY
-        # =====================================================
-
-        "webhook_events": webhook_events,
+    status_counts = {
+        lifecycle_status: sum(
+            1
+            for attempt in attempts
+            if attempt.status == lifecycle_status
+        )
+        for lifecycle_status in RecoveryStatus
     }
 
+    webhook_events = db.query(WebhookEvent).count()
 
-# =============================================================
-# PAYMENTS
-# =============================================================
+    return {
+        "total_payments": len(payments),
+        "failed_payments": len(unresolved_failed_payments),
+        "successful_payments": len(original_successful_payments),
+        "total_payment_amount": format_amount(
+            sum(payment.amount or 0 for payment in payments)
+        ),
+        "revenue_at_risk": format_amount(revenue_at_risk),
+        "revenue_recovered": format_amount(revenue_recovered),
+        "active_recovery_value": format_amount(active_recovery_value),
+        "recovery_rate": recovery_rate,
+        "total_recovery_attempts": len(attempts),
+        "active_recoveries": len(active_attempts),
+        "scheduled_recoveries": status_counts[RecoveryStatus.SCHEDULED],
+        "executing_recoveries": status_counts[RecoveryStatus.EXECUTING],
+        "awaiting_payment_recoveries": status_counts[
+            RecoveryStatus.AWAITING_PAYMENT
+        ],
+        "successful_recoveries": len(successful_recovery_payment_ids),
+        "failed_recoveries": status_counts[RecoveryStatus.FAILED],
+        "blocked_recoveries": status_counts[RecoveryStatus.BLOCKED],
+        "cancelled_recoveries": status_counts[RecoveryStatus.CANCELLED],
+        "exhausted_recoveries": status_counts[RecoveryStatus.EXHAUSTED],
+        "webhook_events": webhook_events,
+    }
 
 
 @router.get("/payments")
@@ -394,102 +223,101 @@ def get_payments(
     db: Session = Depends(get_db),
 ):
     """
-    Return all payments with their latest recovery attempt.
+    Return payments with payment-level recovery state.
 
-    This endpoint is optimized for dashboard tables and allows
-    the frontend to visualize the current recovery lifecycle
-    of every monitored payment.
+    `is_recovered` is authoritative for UI filtering. The original
+    payment may remain historically `failed` even after a separate
+    recovery order successfully recovers the revenue.
     """
 
     payments = (
         db.query(Payment)
-        .order_by(
-            Payment.created_at.desc()
-        )
+        .order_by(Payment.created_at.desc())
         .all()
     )
+
+    all_attempts = db.query(RecoveryAttempt).all()
+
+    attempts_by_payment: dict[int, list[RecoveryAttempt]] = {}
+    for attempt in all_attempts:
+        attempts_by_payment.setdefault(
+            attempt.payment_id,
+            [],
+        ).append(attempt)
 
     results = []
 
     for payment in payments:
-
-        latest_attempt = (
-            get_latest_attempt_for_payment(
-                db,
-                payment.id,
+        payment_attempts = attempts_by_payment.get(payment.id, [])
+        payment_attempts.sort(
+            key=lambda attempt: (
+                attempt.attempt_number,
+                attempt.id,
             )
         )
 
+        latest_attempt = (
+            payment_attempts[-1]
+            if payment_attempts
+            else None
+        )
+
+        successful_attempts = [
+            attempt
+            for attempt in payment_attempts
+            if is_successful_attempt(attempt)
+        ]
+
+        is_recovered = bool(successful_attempts)
+
         recovery = None
-
         if latest_attempt:
-
             recovery = {
                 "attempt_id": latest_attempt.id,
-
-                "attempt_number": (
-                    latest_attempt.attempt_number
-                ),
-
-                # AI decision
+                "attempt_number": latest_attempt.attempt_number,
                 "action": latest_attempt.action,
-
                 "recovery_probability": (
                     latest_attempt.recovery_probability
                 ),
-
-                "decision_reason": (
-                    latest_attempt.decision_reason
+                "decision_reason": latest_attempt.decision_reason,
+                "guardrail_reason": latest_attempt.guardrail_reason,
+                "status": (
+                    RecoveryStatus.COMPLETED.value
+                    if is_recovered
+                    else latest_attempt.status
                 ),
-
-                # Guardrail
-                "guardrail_reason": (
-                    latest_attempt.guardrail_reason
-                ),
-
-                # Lifecycle
-                "status": latest_attempt.status,
-
                 "executed": latest_attempt.executed,
-
-                "recovered": latest_attempt.recovered,
-
-                # Provider references
+                "recovered": is_recovered,
                 "provider_reference_id": (
                     latest_attempt.provider_reference_id
                 ),
-
                 "recovery_payment_id": (
-                    latest_attempt.recovery_payment_id
+                    successful_attempts[-1].recovery_payment_id
+                    if successful_attempts
+                    else latest_attempt.recovery_payment_id
                 ),
-
-                # Financial result
                 "recovered_amount": format_amount(
-                    latest_attempt.recovered_amount
+                    successful_attempts[-1].recovered_amount
+                    if successful_attempts
+                    else latest_attempt.recovered_amount
                 ),
-
-                # Failure information
-                "error_message": (
-                    latest_attempt.error_message
-                ),
-
-                # Timestamps
+                "error_message": latest_attempt.error_message,
                 "created_at": serialize_datetime(
                     latest_attempt.created_at
                 ),
-
                 "scheduled_for": serialize_datetime(
                     latest_attempt.scheduled_for
                 ),
-
                 "executed_at": serialize_datetime(
                     latest_attempt.executed_at
                 ),
-
                 "completed_at": serialize_datetime(
-                    latest_attempt.completed_at
+                    (
+                        successful_attempts[-1].completed_at
+                        if successful_attempts
+                        else latest_attempt.completed_at
+                    )
                 ),
-
                 "updated_at": serialize_datetime(
                     latest_attempt.updated_at
                 ),
@@ -497,70 +325,19 @@ def get_payments(
 
         results.append(
             {
-                # ------------------------------------------------
-                # PAYMENT IDENTITY
-                # ------------------------------------------------
-
                 "id": payment.id,
-
-                "order_id": (
-                    payment.razorpay_order_id
-                ),
-
-                "payment_id": (
-                    payment.razorpay_payment_id
-                ),
-
-                # ------------------------------------------------
-                # PAYMENT VALUE
-                # ------------------------------------------------
-
-                "amount": format_amount(
-                    payment.amount
-                ),
-
+                "order_id": payment.razorpay_order_id,
+                "payment_id": payment.razorpay_payment_id,
+                "amount": format_amount(payment.amount),
                 "currency": payment.currency,
-
-                # ------------------------------------------------
-                # PAYMENT STATUS
-                # ------------------------------------------------
-
                 "status": payment.status,
-
                 "receipt": payment.receipt,
-
-                # ------------------------------------------------
-                # FAILURE INTELLIGENCE
-                # ------------------------------------------------
-
-                "failure_code": (
-                    payment.failure_code
-                ),
-
-                "failure_reason": (
-                    payment.failure_reason
-                ),
-
-                "failure_description": (
-                    payment.failure_description
-                ),
-
-                # ------------------------------------------------
-                # TIMESTAMPS
-                # ------------------------------------------------
-
-                "created_at": serialize_datetime(
-                    payment.created_at
-                ),
-
-                "updated_at": serialize_datetime(
-                    payment.updated_at
-                ),
-
-                # ------------------------------------------------
-                # LATEST RECOVERY STATE
-                # ------------------------------------------------
-
+                "failure_code": payment.failure_code,
+                "failure_reason": payment.failure_reason,
+                "failure_description": payment.failure_description,
+                "created_at": serialize_datetime(payment.created_at),
+                "updated_at": serialize_datetime(payment.updated_at),
+                "is_recovered": is_recovered,
                 "recovery": recovery,
             }
         )
@@ -571,39 +348,19 @@ def get_payments(
     }
 
 
-# =============================================================
-# RECOVERY ATTEMPTS
-# =============================================================
-
-
 @router.get("/recovery-attempts")
 def get_recovery_attempts(
     db: Session = Depends(get_db),
 ):
-    """
-    Return all recovery attempts with their associated payment data.
-
-    Includes:
-    - AI recovery decision
-    - recovery probability
-    - guardrail reasoning
-    - lifecycle state
-    - provider references
-    - verified recovery outcome
-    """
-
     attempts = (
-        db.query(
-            RecoveryAttempt,
-            Payment,
-        )
+        db.query(RecoveryAttempt, Payment)
         .join(
             Payment,
-            RecoveryAttempt.payment_id
-            == Payment.id,
+            RecoveryAttempt.payment_id == Payment.id,
         )
         .order_by(
-            RecoveryAttempt.created_at.desc()
+            RecoveryAttempt.created_at.desc(),
+            RecoveryAttempt.id.desc(),
         )
         .all()
     )
@@ -611,136 +368,43 @@ def get_recovery_attempts(
     results = []
 
     for attempt, payment in attempts:
-
         results.append(
             {
-                # =================================================
-                # ATTEMPT IDENTITY
-                # =================================================
-
                 "id": attempt.id,
-
                 "payment_id": payment.id,
-
-                "attempt_number": (
-                    attempt.attempt_number
-                ),
-
-                # =================================================
-                # ORIGINAL PAYMENT
-                # =================================================
-
-                "razorpay_order_id": (
-                    payment.razorpay_order_id
-                ),
-
-                "razorpay_payment_id": (
-                    payment.razorpay_payment_id
-                ),
-
-                "amount": format_amount(
-                    payment.amount
-                ),
-
+                "attempt_number": attempt.attempt_number,
+                "razorpay_order_id": payment.razorpay_order_id,
+                "razorpay_payment_id": payment.razorpay_payment_id,
+                "amount": format_amount(payment.amount),
                 "currency": payment.currency,
-
                 "payment_status": payment.status,
-
-                # =================================================
-                # FAILURE CONTEXT
-                # =================================================
-
-                "failure_code": (
-                    payment.failure_code
-                ),
-
-                "failure_reason": (
-                    payment.failure_reason
-                ),
-
-                "failure_description": (
-                    payment.failure_description
-                ),
-
-                # =================================================
-                # AI DECISION
-                # =================================================
-
+                "failure_code": payment.failure_code,
+                "failure_reason": payment.failure_reason,
+                "failure_description": payment.failure_description,
                 "action": attempt.action,
-
-                "recovery_probability": (
-                    attempt.recovery_probability
-                ),
-
-                "decision_reason": (
-                    attempt.decision_reason
-                ),
-
-                # =================================================
-                # GUARDRAIL
-                # =================================================
-
-                "guardrail_reason": (
-                    attempt.guardrail_reason
-                ),
-
-                # =================================================
-                # LIFECYCLE
-                # =================================================
-
+                "recovery_probability": attempt.recovery_probability,
+                "decision_reason": attempt.decision_reason,
+                "guardrail_reason": attempt.guardrail_reason,
                 "status": attempt.status,
-
                 "executed": attempt.executed,
-
                 "recovered": attempt.recovered,
-
-                # =================================================
-                # PROVIDER EXECUTION
-                # =================================================
-
-                "provider_reference_id": (
-                    attempt.provider_reference_id
-                ),
-
-                "recovery_payment_id": (
-                    attempt.recovery_payment_id
-                ),
-
-                # =================================================
-                # RECOVERY OUTCOME
-                # =================================================
-
+                "provider_reference_id": attempt.provider_reference_id,
+                "recovery_payment_id": attempt.recovery_payment_id,
                 "recovered_amount": format_amount(
                     attempt.recovered_amount
                 ),
-
-                "error_message": (
-                    attempt.error_message
-                ),
-
-                # =================================================
-                # TIMESTAMPS
-                # =================================================
-
-                "created_at": serialize_datetime(
-                    attempt.created_at
-                ),
-
+                "error_message": attempt.error_message,
+                "created_at": serialize_datetime(attempt.created_at),
                 "scheduled_for": serialize_datetime(
                     attempt.scheduled_for
                 ),
-
                 "executed_at": serialize_datetime(
                     attempt.executed_at
                 ),
-
                 "completed_at": serialize_datetime(
                     attempt.completed_at
                 ),
-
-                "updated_at": serialize_datetime(
-                    attempt.updated_at
-                ),
+                "updated_at": serialize_datetime(attempt.updated_at),
             }
         )
 
@@ -750,55 +414,28 @@ def get_recovery_attempts(
     }
 
 
-# =============================================================
-# RECOVERY PIPELINE BREAKDOWN
-# =============================================================
-
-
 @router.get("/recovery-pipeline")
 def get_recovery_pipeline(
     db: Session = Depends(get_db),
 ):
-    """
-    Return recovery attempts grouped by lifecycle state.
-
-    Useful for pipeline/funnel visualizations in the frontend.
-    """
-
-    statuses = [
-        RecoveryStatus.PENDING.value,
-        RecoveryStatus.APPROVED.value,
-        RecoveryStatus.SCHEDULED.value,
-        RecoveryStatus.EXECUTING.value,
-        RecoveryStatus.AWAITING_PAYMENT.value,
-        RecoveryStatus.COMPLETED.value,
-        RecoveryStatus.FAILED.value,
-        RecoveryStatus.BLOCKED.value,
-        RecoveryStatus.CANCELLED.value,
-        RecoveryStatus.EXHAUSTED.value,
-    ]
-
     attempts = db.query(RecoveryAttempt).all()
 
     pipeline = {}
 
-    for lifecycle_status in statuses:
-
+    for lifecycle_status in RecoveryStatus:
         matching_attempts = [
             attempt
             for attempt in attempts
-            if attempt.status == lifecycle_status
+            if attempt.status == lifecycle_status.value
         ]
 
-        pipeline[lifecycle_status] = {
+        pipeline[lifecycle_status.value] = {
             "count": len(matching_attempts),
             "value": format_amount(
                 sum(
-                    (
-                        attempt.payment.amount
-                        if attempt.payment
-                        else 0
-                    )
+                    attempt.payment.amount
+                    if attempt.payment
+                    else 0
                     for attempt in matching_attempts
                 )
             ),

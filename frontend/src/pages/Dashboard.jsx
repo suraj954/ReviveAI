@@ -32,7 +32,11 @@ export default function Dashboard({ onViewIntelligence, refreshToken }) {
   }, [load, refreshToken])
 
   const atRiskPayments = payments
-    .filter((p) => String(p.status).toLowerCase() === 'failed')
+    .filter(
+      (p) =>
+        String(p.status).toLowerCase() === 'failed' &&
+        p.is_recovered !== true
+    )
     .slice(0, 8)
 
   if (loading) return <LoadingState label="Loading revenue recovery snapshot…" />
