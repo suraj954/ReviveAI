@@ -1,12 +1,12 @@
 # ReviveAI
 
-> An AI-powered revenue recovery engine that detects failed payments, evaluates recovery potential, and executes safe, bounded workflows to win revenue back.
+> **An AI-powered revenue recovery engine that detects failed payments, estimates recovery potential, and executes safe, bounded workflows to win revenue back.**
 
 Built for the **Razorpay AI Builder Hackathon 2026** under the **AI Revenue Recovery** track.
 
 ---
 
-## The Problem
+## 🎯 The Problem
 
 A failed payment does not always mean a lost customer.
 
@@ -19,7 +19,7 @@ Payments can fail because of:
 - Insufficient funds at a specific moment
 - Accidental checkout abandonment
 
-For merchants, these failures often become permanently lost revenue.
+For merchants, many of these failures eventually become permanently lost revenue.
 
 Traditional payment systems primarily answer:
 
@@ -27,13 +27,13 @@ Traditional payment systems primarily answer:
 
 ReviveAI asks a more valuable question:
 
-> Did revenue slip away, and can it be safely recovered?
+> **Did revenue slip away, and can it be safely recovered?**
 
 ReviveAI treats eligible payment failures as recovery opportunities rather than the end of a transaction.
 
 ---
 
-# Hackathon Track Alignment
+# 🏆 Hackathon Track Alignment
 
 ## Razorpay AI Revenue Recovery
 
@@ -46,7 +46,7 @@ ReviveAI is designed directly around this lifecycle.
 | Track Requirement | ReviveAI Implementation |
 |---|---|
 | Detect revenue at risk | Razorpay payment failure webhooks |
-| Determine intervention | Recovery probability and policy evaluation |
+| Determine intervention | ML recovery probability + policy evaluation |
 | Apply AI intelligence | ML-based recovery scoring |
 | Enforce safety | Guardrails and lifecycle validation |
 | Execute workflow | Recovery checkout generation |
@@ -54,13 +54,11 @@ ReviveAI is designed directly around this lifecycle.
 | Recover revenue | Secure Razorpay payment retry |
 | Measure results | Merchant recovery intelligence dashboard |
 
-ReviveAI is not simply a payment retry system.
-
-It is a **decision-driven revenue recovery engine**.
+> **ReviveAI is not simply a payment retry system. It is a decision-driven revenue recovery engine.**
 
 ---
 
-# Solution Overview
+# ⚡ Solution Overview
 
 ReviveAI sits between payment failure detection and customer recovery.
 
@@ -72,7 +70,7 @@ Razorpay Payment
         |
         | Payment Failed
         v
-Razorpay Webhook
+Verified Razorpay Webhook
         |
         v
 ReviveAI Event Processing
@@ -81,9 +79,12 @@ ReviveAI Event Processing
 AI Recovery Agent
         |
         +--> Payment Features
-        +--> Recovery Probability
+        |
+        +--> ML Recovery Probability
+        |
+        +--> Policy Evaluation
+        |
         +--> Guardrails
-        +--> Recovery Policy
         |
         v
 Recovery Decision
@@ -99,86 +100,13 @@ Recovery Decision
            Customer Retry
                   |
                   v
+           Verified Payment Event
+                  |
+                  v
            Revenue Recovered
-Core Intelligence
+🔥 End-to-End Recovery Proof
 
-ReviveAI does not blindly retry every failed payment.
-
-Each failed payment passes through an intelligent decision pipeline.
-
-1. Feature Extraction
-
-Relevant payment signals are transformed into structured features.
-
-Examples include:
-
-Payment amount
-Currency
-Payment failure characteristics
-Previous recovery attempts
-Time since payment failure
-Payment lifecycle state
-
-These features are passed to the recovery intelligence layer.
-
-2. Recovery Probability
-
-The ML model estimates the likelihood that a failed payment can be successfully recovered.
-
-Payment Failure
-       |
-       v
-Feature Extraction
-       |
-       v
-ML Recovery Model
-       |
-       v
-Recovery Probability
-
-The recovery probability is persisted with the recovery attempt for observability and auditability.
-
-3. Guardrails
-
-A high recovery probability alone does not automatically trigger action.
-
-ReviveAI applies business and safety constraints including:
-
-Maximum recovery attempts
-Payment lifecycle validation
-Duplicate recovery prevention
-Payment state validation
-Recovery workflow expiration checks
-
-Example:
-
-MAX_RECOVERY_ATTEMPTS = 3
-
-This ensures that recovery workflows remain bounded.
-
-4. Policy Decision
-
-The policy layer combines intelligence with operational constraints.
-
-ML Probability
-      +
-Business Guardrails
-      +
-Payment State
-      |
-      v
-Recovery Decision
-
-Possible outcomes include:
-
-Recover
-Do not recover
-Recovery unavailable
-Recovery expired
-Payment already resolved
-End-to-End Recovery Lifecycle
-
-ReviveAI implements a complete recovery lifecycle.
+ReviveAI implements a complete provider-verified recovery lifecycle.
 
 1. Customer starts checkout
             |
@@ -204,26 +132,114 @@ ReviveAI implements a complete recovery lifecycle.
 8. Recovery Agent evaluates payment
             |
             v
-9. Guardrails validate recovery
+9. ML recovery probability calculated
             |
             v
-10. Recovery workflow approved
+10. Guardrails validate recovery
             |
             v
-11. Recovery checkout generated
+11. Recovery workflow approved
             |
             v
-12. Customer receives retry opportunity
+12. Recovery checkout generated
             |
             v
-13. Customer completes recovery payment
+13. Customer retries payment
             |
             v
-14. Razorpay webhook reconciles payment
+14. Razorpay webhook reconciles outcome
             |
             v
-15. Revenue marked as recovered
-Architecture
+15. Revenue marked recovered
+Important design principle
+
+Recovery is not marked successful based only on a frontend callback.
+
+Revenue is marked recovered only after the payment lifecycle is reconciled using a verified provider event.
+
+🧠 Recovery Intelligence
+
+ReviveAI does not blindly retry every failed payment.
+
+Each failed payment passes through an intelligent decision pipeline.
+
+1. Feature Extraction
+
+Relevant payment signals are transformed into structured features.
+
+Examples include:
+
+Payment amount
+Currency
+Payment failure characteristics
+Previous recovery attempts
+Time since payment failure
+Payment lifecycle state
+
+These features are passed to the recovery intelligence layer.
+
+2. ML Recovery Probability
+
+The ML model estimates the likelihood that a failed payment can be successfully recovered.
+
+Payment Failure
+       |
+       v
+Feature Extraction
+       |
+       v
+ML Recovery Model
+       |
+       v
+Recovery Probability
+
+ReviveAI uses a machine learning-based scoring pipeline to generate a recovery probability.
+
+The probability is persisted with the recovery attempt for:
+
+Observability
+Decision transparency
+Auditability
+Merchant intelligence
+3. Guardrails
+
+A high recovery probability alone does not automatically trigger action.
+
+ReviveAI applies business and safety constraints including:
+
+Maximum recovery attempts
+Payment lifecycle validation
+Duplicate recovery prevention
+Payment state validation
+Recovery workflow expiration checks
+
+Example bounded constraint:
+
+MAX_RECOVERY_ATTEMPTS = 3
+
+This ensures recovery workflows remain controlled and prevents aggressive retry loops.
+
+4. Policy Decision
+
+The policy layer combines intelligence with operational constraints.
+
+ML Probability
+      +
+Business Guardrails
+      +
+Payment Lifecycle State
+      |
+      v
+Recovery Decision
+
+Possible outcomes include:
+
+Recover
+Do not recover
+Recovery unavailable
+Recovery expired
+Payment already resolved
+🏗️ Architecture
 High-Level Architecture
                     +----------------------+
                     |   Demo Storefront    |
@@ -243,130 +259,23 @@ High-Level Architecture
        Order Management   Recovery Agent   Dashboard API
               |                |                |
               v                v                v
-           Razorpay        ML + Policy    Merchant Insights
+          Razorpay        ML + Policy   Merchant Insights
                                |
                                v
                           Guardrails
                                |
                                v
-                       Recovery Workflow
+                        Recovery Workflow
                                |
-              +----------------+----------------+
+                               v
+                      Recovery Checkout
                                |
                                v
                         Razorpay Webhooks
                                |
                                v
-                    Lifecycle Reconciliation
-Tech Stack
-Backend
-Python
-FastAPI
-SQLAlchemy
-Pydantic
-Uvicorn
-Machine Learning
-Scikit-learn
-Logistic Regression
-Feature engineering pipeline
-Payments
-Razorpay Orders API
-Razorpay Checkout
-Razorpay Webhooks
-Frontend
-Merchant Dashboard
-React
-Vite
-Customer Demo Storefront
-React
-Vite
-Razorpay Checkout
-Infrastructure
-SQLite for local development
-zrok for secure webhook tunneling
-Project Structure
-ReviveAI
-|
-+-- backend
-|   |
-|   +-- app
-|   |   |
-|   |   +-- agents
-|   |   |   +-- recovery_agent.py
-|   |   |
-|   |   +-- api
-|   |   |   +-- dashboard.py
-|   |   |   +-- insights.py
-|   |   |   +-- orders.py
-|   |   |   +-- recovery_checkout.py
-|   |   |   +-- webhooks.py
-|   |   |
-|   |   +-- db
-|   |   |   +-- base.py
-|   |   |   +-- database.py
-|   |   |   +-- session.py
-|   |   |
-|   |   +-- decisions
-|   |   |   +-- guardrails.py
-|   |   |   +-- policy.py
-|   |   |
-|   |   +-- ml
-|   |   |   +-- dataset.py
-|   |   |   +-- features.py
-|   |   |   +-- recovery_model.py
-|   |   |   +-- train.py
-|   |   |
-|   |   +-- models
-|   |   |   +-- payment.py
-|   |   |   +-- recovery_attempt.py
-|   |   |   +-- recovery_event.py
-|   |   |   +-- webhook_event.py
-|   |   |
-|   |   +-- razorpay
-|   |   |   +-- client.py
-|   |   |   +-- orders.py
-|   |   |   +-- recovery_gateway.py
-|   |   |
-|   |   +-- services
-|   |       +-- recovery_service.py
-|   |       +-- recovery_executor.py
-|   |       +-- recovery_scheduler.py
-|   |       +-- recovery_scheduler_runner.py
-|   |       +-- recovery_trigger.py
-|   |       +-- recovery_audit_service.py
-|   |       +-- recovery_token.py
-|   |
-|   +-- tests
-|   |
-|   +-- main.py
-|
-+-- frontend
-|   +-- Merchant Recovery Intelligence Dashboard
-|
-+-- demo-storefront
-|   |
-|   +-- src
-|       |
-|       +-- components
-|       |   +-- Navbar.jsx
-|       |   +-- ProductCard.jsx
-|       |   +-- CheckoutModal.jsx
-|       |   +-- RecoveryStatus.jsx
-|       |
-|       +-- data
-|       |   +-- products.js
-|       |
-|       +-- services
-|           +-- api.js
-|
-+-- data
-+-- docs
-+-- notebooks
-|
-+-- .env.example
-+-- .gitignore
-+-- README.md
-Key Features
+                     Lifecycle Reconciliation
+✨ Key Features
 1. Payment Failure Detection
 
 ReviveAI receives Razorpay payment lifecycle events through webhooks.
@@ -392,12 +301,12 @@ Extract Signature
        v
 HMAC SHA256 Verification
        |
-       +--> Invalid -> Reject
+       +--> Invalid → Reject
        |
        +--> Valid
               |
               v
-          Process Event
+        Process Event
 
 This prevents unauthorized systems from triggering recovery workflows.
 
@@ -424,11 +333,11 @@ RecoveryAgent
       +--> Policy Engine
 4. Bounded Recovery Attempts
 
-ReviveAI prevents aggressive retry loops.
+ReviveAI prevents uncontrolled retry loops.
 
 MAX_RECOVERY_ATTEMPTS = 3
 
-The system checks existing recovery attempts before generating another recovery workflow.
+Before generating another recovery workflow, the system evaluates existing attempts and lifecycle state.
 
 This protects:
 
@@ -440,17 +349,17 @@ And ensures the recovery agent behaves responsibly.
 
 5. Secure Recovery Access
 
-Customers are not exposed to internal merchant recovery intelligence.
+Customers are not exposed to internal merchant intelligence.
 
 ReviveAI generates customer-scoped recovery access tokens.
 
-The customer can access:
+Customers can access:
 
 Recovery status
 Recovery availability
 Recovery checkout
 
-The customer cannot access:
+Customers cannot access:
 
 Internal ML probability
 Merchant analytics
@@ -484,13 +393,11 @@ recovery_checkout_generated
 recovery_payment_completed
 revenue_recovered
 
-This provides visibility into the AI agent's decisions.
+This makes AI decisions observable and easier to debug and audit.
 
-8. Webhook Reconciliation
+8. Provider-Driven Webhook Reconciliation
 
 Recovery completion is not trusted solely from the frontend.
-
-Razorpay payment events reconcile the actual lifecycle.
 
 Customer completes payment
            |
@@ -509,9 +416,9 @@ Recovery attempt resolved
            v
 Revenue marked recovered
 
-This keeps the recovery system provider-driven rather than frontend-driven.
+This keeps recovery state provider-driven rather than frontend-driven.
 
-Customer Demo Storefront
+🛍️ Customer Demo Storefront
 
 ReviveAI includes a dedicated customer-facing demo storefront.
 
@@ -530,23 +437,23 @@ Razorpay Checkout
       +--> Payment Failure
                |
                v
-       ReviveAI Monitoring
+        ReviveAI Monitoring
                |
                v
-       Recovery Evaluation
+        Recovery Evaluation
                |
                v
-       Recovery Available
+        Recovery Available
                |
                v
-       Secure Retry Checkout
+        Secure Retry Checkout
                |
                v
-       Payment Success
+        Payment Success
 
 The customer experience is intentionally separated from the merchant intelligence layer.
 
-Merchant Recovery Intelligence Dashboard
+📊 Merchant Recovery Intelligence Dashboard
 
 ReviveAI includes a merchant-facing dashboard that provides visibility into revenue recovery.
 
@@ -558,98 +465,149 @@ Recovery attempts
 Successfully recovered payments
 Recovery success rate
 Revenue recovered
+Revenue at risk
 Recovery probability
 Decision reasons
 Recovery lifecycle state
 
+Each payment can also expose detailed Recovery Intelligence, including:
+
+Failure diagnosis
+AI recovery decision
+Recovery probability
+Guardrail outcome
+Recovery timeline
+Audit events
+Revenue flow
+
 This transforms payment recovery from a black-box process into an observable business workflow.
 
-Why This Is AI Revenue Recovery
-Without ReviveAI
-Payment Failed
-      |
-      v
-Revenue Lost
-With ReviveAI
-Payment Failed
-      |
-      v
-AI Evaluation
-      |
-      v
-Safe Recovery Decision
-      |
-      v
-Bounded Intervention
-      |
-      v
-Customer Retry
-      |
-      v
-Revenue Recovered
+📸 Demo Screenshots
 
-The system moves from passive payment failure handling to intelligent revenue recovery orchestration.
+Screenshots from the live end-to-end demo will be added here.
 
-Design Principles
-1. Do Not Recover Everything
+Suggested screenshots:
 
-Not every failed payment should be retried.
-
-Recovery actions are based on:
-
-Recovery probability
-Guardrails
-Lifecycle state
-Attempt limits
-2. Keep AI Actions Bounded
-
-Autonomous systems interacting with financial workflows require constraints.
-
-ReviveAI limits:
-
-Number of attempts
-Valid lifecycle transitions
-Recovery eligibility
-3. Provider Events Are the Source of Truth
-
-Frontend success callbacks are not sufficient.
-
-Razorpay webhooks reconcile actual payment outcomes.
-
-4. Separate Customer and Merchant Intelligence
-
-Customers receive:
-
-Recovery availability
-Recovery checkout
-
-Merchants receive:
-
-Recovery probability
-Decision reasons
-Revenue analytics
-5. Make AI Decisions Observable
-
-Recovery decisions generate lifecycle and audit events.
-
-This makes the system easier to debug, evaluate, and trust.
-
-Local Setup
+Customer storefront
+Failed payment state
+Recovery opportunity
+Merchant dashboard
+Recovery Intelligence view
+Successfully recovered revenue
+🛠️ Tech Stack
+Backend
+Python
+FastAPI
+SQLAlchemy
+Pydantic
+Uvicorn
+Machine Learning
+Scikit-learn
+Logistic Regression
+Feature engineering pipeline
+Payments
+Razorpay Orders API
+Razorpay Checkout
+Razorpay Webhooks
+Frontend
+Merchant Dashboard
+React
+Vite
+Customer Demo Storefront
+React
+Vite
+Razorpay Checkout
+Infrastructure
+PostgreSQL
+Alembic migrations
+zrok for secure webhook tunneling
+📁 Project Structure
+ReviveAI
+│
+├── backend
+│   │
+│   ├── alembic
+│   │
+│   ├── app
+│   │   │
+│   │   ├── agents
+│   │   │   └── recovery_agent.py
+│   │   │
+│   │   ├── api
+│   │   │   ├── dashboard.py
+│   │   │   ├── insights.py
+│   │   │   ├── orders.py
+│   │   │   ├── recovery_checkout.py
+│   │   │   └── webhooks.py
+│   │   │
+│   │   ├── db
+│   │   │
+│   │   ├── decisions
+│   │   │   ├── guardrails.py
+│   │   │   └── policy.py
+│   │   │
+│   │   ├── events
+│   │   │
+│   │   ├── guardrails
+│   │   │
+│   │   ├── ml
+│   │   │   ├── dataset.py
+│   │   │   ├── features.py
+│   │   │   ├── recovery_model.py
+│   │   │   └── train.py
+│   │   │
+│   │   ├── models
+│   │   │   ├── payment.py
+│   │   │   ├── recovery_attempt.py
+│   │   │   ├── recovery_event.py
+│   │   │   └── webhook_event.py
+│   │   │
+│   │   ├── razorpay
+│   │   │   ├── client.py
+│   │   │   ├── orders.py
+│   │   │   └── recovery_gateway.py
+│   │   │
+│   │   └── services
+│   │       ├── recovery_service.py
+│   │       ├── recovery_executor.py
+│   │       ├── recovery_scheduler.py
+│   │       ├── recovery_scheduler_runner.py
+│   │       ├── recovery_trigger.py
+│   │       ├── recovery_audit_service.py
+│   │       └── recovery_token.py
+│   │
+│   ├── tests
+│   │
+│   └── main.py
+│
+├── frontend
+│   └── Merchant Recovery Intelligence Dashboard
+│
+├── demo-storefront
+│   ├── src
+│   │   ├── components
+│   │   ├── data
+│   │   └── services
+│
+├── .env.example
+├── .gitignore
+└── README.md
+🚀 Local Setup
 1. Clone Repository
 git clone https://github.com/suraj954/ReviveAI.git
 cd ReviveAI
 2. Create Python Environment
+cd backend
 python -m venv .venv
 Windows
 .venv\Scripts\activate
 Linux / macOS
 source .venv/bin/activate
 3. Install Backend Dependencies
-cd backend
 pip install -r requirements.txt
 4. Configure Environment
 
-Create a .env file in the project root.
+Create a .env file in the project root or backend configuration location as required.
 
 RAZORPAY_KEY_ID=your_razorpay_key_id
 RAZORPAY_KEY_SECRET=your_razorpay_key_secret
@@ -657,7 +615,13 @@ RAZORPAY_WEBHOOK_SECRET=your_webhook_secret
 
 Never commit real secrets.
 
-5. Start Backend
+5. Database Setup
+
+Run Alembic migrations:
+
+cd backend
+alembic upgrade head
+6. Start Backend
 
 From the backend directory:
 
@@ -670,7 +634,7 @@ http://127.0.0.1:8000
 Swagger API documentation:
 
 http://127.0.0.1:8000/docs
-Running the Customer Storefront
+🛍️ Running the Customer Storefront
 cd demo-storefront
 npm install
 npm run dev
@@ -680,16 +644,16 @@ The storefront runs separately from the merchant dashboard.
 This allows the demo to show two perspectives:
 
 Customer
-    |
-    v
+   |
+   v
 Demo Storefront
-    |
-    v
+   |
+   v
 ReviveAI Backend
-    |
-    v
+   |
+   v
 Merchant Intelligence Dashboard
-Razorpay Webhook Setup
+🔗 Razorpay Webhook Setup
 
 For local development, the backend must be publicly reachable.
 
@@ -711,43 +675,44 @@ payment.failed
 payment.captured
 order.paid
 payment_link.paid
-Testing
+🧪 Testing
 
-The backend contains tests for critical components.
+The backend contains automated tests covering critical components.
 
 Examples include:
 
-test_config.py
-test_razorpay_connection.py
-test_webhooks.py
-test_recovery_service.py
-test_recovery_scheduler.py
+Configuration
+Razorpay connection
+Webhook verification
+Recovery service
+Recovery scheduler
+Recovery lifecycle
+ML model pipeline
+Guardrails
+Policy decisions
 
-Run tests with:
+Run all tests:
 
-pytest
+pytest -q
 
-Or:
+Current verified test status:
 
-python -m pytest
-Demo Scenario
-
-The recommended demonstration flow is:
-
-Step 1 - Customer Checkout
+92 passed
+🎬 Recommended Demo Flow
+Step 1 — Customer Checkout
 
 Open the ReviveAI demo storefront.
 
 Select a product and click:
 
 Buy Now
-Step 2 - Trigger Payment Failure
+Step 2 — Trigger Payment Failure
 
 Open Razorpay Checkout and intentionally trigger a failed payment.
 
 The storefront displays a payment interruption state.
 
-Step 3 - Webhook Detection
+Step 3 — Webhook Detection
 
 Razorpay sends:
 
@@ -762,7 +727,7 @@ ReviveAI then:
 Verifies the webhook
 Records the failure
 Triggers recovery evaluation
-Step 4 - AI Evaluation
+Step 4 — AI Evaluation
 
 The Recovery Agent:
 
@@ -780,70 +745,131 @@ Run Recovery Policy
 If recovery is approved:
 
 Recovery Workflow Created
-Step 5 - Customer Recovery
+Step 5 — Customer Recovery
 
 The storefront checks the customer-safe recovery endpoint.
 
 When recovery becomes available, the customer receives a secure retry opportunity.
 
-Step 6 - Successful Recovery
+Step 6 — Successful Recovery
 
 The customer completes payment through Razorpay Checkout.
 
-Razorpay sends the payment event.
+Razorpay sends a verified payment event.
 
 ReviveAI reconciles the lifecycle.
 
 Result:
 
 Revenue Recovered
-Step 7 - Merchant Dashboard
+Step 7 — Merchant Intelligence
 
 The merchant dashboard reflects:
 
 Failed payment
 Recovery attempt
 Recovery decision
-Recovered payment
+Recovery probability
+Guardrail decision
+Verified recovery
 Recovered revenue
 
 This demonstrates measurable business impact.
 
-Example Recovery Lifecycle
-Payment Created
-      |
-      v
+🧪 Recovery Scenarios Tested
+
+The complete recovery lifecycle has been tested across multiple scenarios.
+
+Scenario 1 — Failed Payment → Recovery → Success
 Payment Failed
-      |
-      v
-Recovery Evaluated
-      |
-      +--> Recovery Probability
-      |
-      +--> Guardrails Passed
-      |
-      v
-Recovery Approved
-      |
-      v
-Recovery Checkout Created
-      |
-      v
+      ↓
+AI Evaluation
+      ↓
+Recovery Checkout
+      ↓
 Customer Retry
-      |
-      v
-Payment Captured
-      |
-      v
-Recovery Resolved
-      |
-      v
+      ↓
+Verified Success
+      ↓
 Revenue Recovered
-Future Improvements
+Scenario 2 — Failed Payment → Recovery Awaiting Payment → Success
+Payment Failed
+      ↓
+Recovery Created
+      ↓
+Awaiting Customer Payment
+      ↓
+Customer Completes Recovery
+      ↓
+Webhook Verification
+      ↓
+Revenue Recovered
+Scenario 3 — Recovery Failure → Bounded Re-evaluation
+Payment Failed
+      ↓
+Recovery Attempt
+      ↓
+Recovery Payment Failed
+      ↓
+Lifecycle Re-evaluation
+      ↓
+Bounded Next Attempt
+
+These scenarios validate that ReviveAI handles both successful and unsuccessful recovery paths while maintaining bounded execution.
+
+🧭 Design Principles
+Do Not Recover Everything
+
+Not every failed payment should be retried.
+
+Recovery decisions depend on:
+
+Recovery probability
+Guardrails
+Lifecycle state
+Attempt limits
+Keep AI Actions Bounded
+
+Autonomous systems interacting with financial workflows require constraints.
+
+ReviveAI limits:
+
+Number of attempts
+Valid lifecycle transitions
+Recovery eligibility
+Provider Events Are the Source of Truth
+
+Frontend success callbacks are not sufficient.
+
+Razorpay webhooks reconcile actual payment outcomes.
+
+Separate Customer and Merchant Intelligence
+
+Customers receive:
+
+Recovery availability
+Recovery checkout
+
+Merchants receive:
+
+Recovery probability
+Decision reasons
+Revenue analytics
+Make AI Decisions Observable
+
+Recovery decisions generate lifecycle and audit events.
+
+This makes the system easier to:
+
+Debug
+Evaluate
+Audit
+Trust
+🔮 Future Improvements
 
 Potential future directions include:
 
-Advanced AI Models
+Advanced Recovery Models
 Gradient boosting recovery models
 Temporal payment behavior models
 Customer segmentation
@@ -874,30 +900,42 @@ Production Infrastructure
 
 Potential production improvements:
 
-PostgreSQL
 Redis queues
-Celery workers
-Distributed scheduler
-Observability dashboards
+Distributed workers
+Production scheduler infrastructure
 Model monitoring
 Automated model retraining
-What Makes ReviveAI Different?
+💡 Why ReviveAI Matters
 
-Most payment systems focus on:
+Without intelligent recovery:
 
-Did the payment succeed?
+Payment Failed
+      |
+      v
+Revenue Lost
 
-ReviveAI asks:
+With ReviveAI:
 
-Did revenue slip away?
-Can it be recovered?
-What is the safest intervention?
-Should the system act?
-Did the intervention actually recover revenue?
+Payment Failed
+      |
+      v
+AI Evaluation
+      |
+      v
+Safe Recovery Decision
+      |
+      v
+Bounded Intervention
+      |
+      v
+Customer Retry
+      |
+      v
+Verified Revenue Recovery
 
-That shift transforms payment failure handling into an intelligent recovery problem.
+ReviveAI transforms payment failure handling from a passive event into an intelligent, observable, and bounded revenue recovery workflow.
 
-Impact
+🎯 Impact
 
 ReviveAI demonstrates how AI agents can responsibly operate in financial workflows.
 
@@ -911,19 +949,21 @@ Executes bounded workflows
 Protects customer access
 Reconciles real provider events
 Measures actual recovered revenue
-ReviveAI in One Sentence
+🧠 ReviveAI in One Sentence
 
 ReviveAI is an AI-powered revenue recovery agent that detects failed payments, intelligently determines whether recovery is worthwhile, and executes safe, bounded workflows to give lost revenue another chance.
 
-Built By
+👨‍💻 Built By
 
 Suraj Dwivedi
 
-GitHub: https://github.com/suraj954
-
 Project Repository:
 
-https://github.com/suraj954/ReviveAI
+ReviveAI on GitHub
+
+GitHub:
+
+Suraj Dwivedi's GitHub
 
 License
 
